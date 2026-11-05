@@ -9,13 +9,9 @@ import { SAMPLE_CROP_TIMELINE } from '@/modules/history/recovery-tracker';
 import { VERIFIED_PESTICIDES, searchPesticidesByQuery } from '@/config/pesticide-registry';
 import { getGeminiClient, getActiveGeminiModelName, generateAiText, generateAiMultimodal } from '@/lib/ai/gemini';
 import { getServerSessionUser } from '@/lib/firebase/server-session';
-import { PathogenCategory } from '@/types/models';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
-
-const OUTBREAK_CROPS = new Set(['Chilli', 'Paddy', 'Cotton', 'Tomato', 'Groundnut']);
-const CONTAGIOUS_PATHOGENS = new Set<PathogenCategory>(['fungal', 'bacterial', 'viral', 'pest']);
 
 export async function POST(req: NextRequest) {
   try {
@@ -254,10 +250,8 @@ async function handleImageInteraction(
   const pathogenType = diagnosis.suspectedPathogenCategory;
   const shouldBroadcast =
     diagnosis.success &&
-    !diagnosis.needsAdditionalAngles &&
     diagnosis.primaryCandidate.symptomMatchConfidence >= 0.7 &&
-    CONTAGIOUS_PATHOGENS.has(pathogenType) &&
-    OUTBREAK_CROPS.has(diagnosis.crop);
+    Number.isFinite(diagnosis.primaryCandidate.symptomMatchConfidence);
 
   if (shouldBroadcast) {
     try {
