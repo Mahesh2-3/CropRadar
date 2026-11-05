@@ -29,7 +29,7 @@ export interface StoredChatMessage {
 
 export interface FarmerNotification {
   id: string;
-  type: 'verified-outbreak' | string;
+  type: 'verified-outbreak' | 'ai-diagnosis-outbreak' | 'farmer-reported-outbreak';
   reportId: string;
   titleEn: string;
   titleTe: string;

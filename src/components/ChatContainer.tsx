@@ -89,7 +89,7 @@ export default function ChatContainer({
     {
       title: t('quickChips.outbreaks'),
       queryTe: 'మా ప్రాంతంలో ఇతర పొలాల్లో ఏవైనా తెగుళ్లు వ్యాపిస్తున్నాయా?',
-      queryEn: 'Are there any verified disease outbreaks near my farm?',
+      queryEn: 'Are there any nearby disease reports?',
     },
     {
       title: t('quickChips.history'),
@@ -436,7 +436,7 @@ function OutbreakAlertCard({ data, language }: { data: any; language: 'te' | 'en
       <div className="flex items-center justify-between">
         <span className="text-[10px] font-bold uppercase text-red-600 flex items-center gap-1">
           <Radio className="w-3.5 h-3.5 animate-pulse" />
-          <span>{isTe ? 'సమీప వ్యాప్తి హెచ్చరిక' : '5km Verified Outbreak'}</span>
+          <span>{isTe ? 'సమీప పంట నివేదికలు' : '5km Nearby Disease Reports'}</span>
         </span>
         <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300">
           {data.totalNearbyOutbreaks} {isTe ? 'నివేదికలు' : 'Reports'}
@@ -453,6 +453,15 @@ function OutbreakAlertCard({ data, language }: { data: any; language: 'te' | 'en
               {first.distanceKm} km {isTe ? 'దూరం' : 'away'}
             </span>
           </div>
+          <p className={`text-[10px] font-semibold ${
+            first.verificationStatus === 'verified'
+              ? 'text-emerald-700 dark:text-emerald-300'
+              : 'text-amber-700 dark:text-amber-300'
+          }`}>
+            {first.verificationStatus === 'verified'
+              ? (isTe ? 'వ్యవసాయ అధికారిచే ధృవీకరించబడింది' : 'Verified by an agronomist')
+              : (isTe ? 'AI సహాయంతో రూపొందించినది; క్షేత్రస్థాయిలో ధృవీకరించబడలేదు' : 'AI-assisted; not field-verified')}
+          </p>
           <p className="text-[11px] text-stone-600 dark:text-stone-300">
             <strong>{isTe ? 'ముందస్తు రక్షణ:' : 'Precaution:'}</strong>{' '}
             {isTe ? first.recommendedPrecautionTe : first.recommendedPrecautionEn}

@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getFirebaseAdminFirestore } from '@/lib/firebase/admin';
 import { getServerSessionUser } from '@/lib/firebase/server-session';
-import { createPendingDiseaseReport, getStoredDiseaseReports } from '@/modules/geospatial/firestore-alerts';
+import {
+  createFarmerReportedDiseaseReport,
+  getStoredDiseaseReports,
+} from '@/modules/geospatial/firestore-alerts';
 import { queryVerifiedOutbreaks } from '@/modules/geospatial/network';
 import { OutbreakSeverity, PathogenCategory } from '@/types/models';
 
@@ -38,7 +41,7 @@ export async function GET(request: NextRequest) {
     const radiusInput = Number(request.nextUrl.searchParams.get('radius') || 5);
     const radiusKm = Number.isFinite(radiusInput) ? Math.min(15, Math.max(1, radiusInput)) : 5;
     const crop = request.nextUrl.searchParams.get('crop') || undefined;
-    const reports = await getStoredDiseaseReports('verified');
+    const reports = await getStoredDiseaseReports();
     const result = queryVerifiedOutbreaks(
       farmLocation.latitude,
       farmLocation.longitude,
@@ -79,7 +82,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const report = await createPendingDiseaseReport({
+    const { report, notifiedFarmers } = await createFarmerReportedDiseaseReport({
       reporterUid: sessionUser.uid,
       crop,
       diseaseName,
@@ -90,8 +93,11 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       report,
-      notificationStatus: 'pending-verification',
-      message: 'Report submitted for verification. Nearby farmers will be notified after it is confirmed.',
+      notificationStatus: notifiedFarmers > 0 ? 'sent' : 'no-nearby-farms',
+      notifiedFarmers,
+      message: notifiedFarmers > 0
+        ? `Report submitted. ${notifiedFarmers} nearby farmer(s) were notified.`
+        : 'Report submitted. No other farms with saved locations were found within 5 km.',
     }, { status: 201 });
   } catch (error) {
     if (error instanceof Error && error.message === 'FARM_LOCATION_REQUIRED') {

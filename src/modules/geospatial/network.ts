@@ -82,7 +82,7 @@ let SEED_DISEASE_REPORTS: DiseaseReport[] = [
 const DISPATCHED_ALERTS_SET = new Set<string>();
 
 /**
- * Query ONLY verified outbreaks strictly within farmer's configured radiusKm
+ * Query verified or AI-screened outbreaks within the farmer's configured radiusKm.
  */
 export function queryVerifiedOutbreaks(
   userLat: number,
@@ -94,8 +94,7 @@ export function queryVerifiedOutbreaks(
   const matchingReports: NearbyOutbreakItem[] = [];
 
   for (const report of reports) {
-    // STRICT RULE: Only verified reports trigger public outbreak notifications
-    if (report.verificationStatus !== 'verified') {
+    if (report.verificationStatus !== 'verified' && report.verificationStatus !== 'automated') {
       continue;
     }
 

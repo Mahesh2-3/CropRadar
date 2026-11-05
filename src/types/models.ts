@@ -12,7 +12,7 @@ export type SprayWindowStatus = 'OPTIMAL' | 'MARGINAL' | 'PROHIBITED';
 
 export type OutbreakSeverity = 'low' | 'moderate' | 'severe';
 
-export type ReportVerificationStatus = 'pending' | 'verified' | 'rejected';
+export type ReportVerificationStatus = 'pending' | 'automated' | 'verified' | 'rejected';
 
 export type AlertRadiusKm = 1 | 3 | 5 | 10 | 15;
 

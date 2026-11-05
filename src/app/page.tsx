@@ -315,30 +315,14 @@ export default function HomePage() {
     };
   }, [currentUser?.uid]);
 
-  const resolveConversationCrop = (message: string, selectedCropName?: string) => {
+  const resolveConversationCrop = (selectedCropName?: string) => {
     if (selectedCropName) {
       return { cropId: normalizeCropId(selectedCropName), cropName: selectedCropName };
     }
     if (activeCropName && activeCropId) {
       return { cropId: activeCropId, cropName: activeCropName };
     }
-
-    const lowerMessage = message.toLowerCase();
-    const cropAliases: Array<{ name: string; aliases: string[] }> = [
-      { name: 'Paddy', aliases: ['paddy', 'rice', 'వరి'] },
-      { name: 'Chilli', aliases: ['chilli', 'chili', 'మిరప'] },
-      { name: 'Cotton', aliases: ['cotton', 'పత్తి'] },
-      { name: 'Tomato', aliases: ['tomato', 'టమాటా', 'టమోటా'] },
-      { name: 'Groundnut', aliases: ['groundnut', 'peanut', 'వేరుశనగ'] },
-    ];
-    const matchedCrop = cropAliases.find((crop) => crop.aliases.some((alias) =>
-      /[a-z]/i.test(alias)
-        ? new RegExp(`(^|[^a-z])${alias}([^a-z]|$)`, 'i').test(lowerMessage)
-        : lowerMessage.includes(alias)
-    ));
-    return matchedCrop
-      ? { cropId: normalizeCropId(matchedCrop.name), cropName: matchedCrop.name }
-      : undefined;
+    return undefined;
   };
 
   // When language changes, stop active speech and auto-translate any messages missing target language
@@ -447,7 +431,7 @@ export default function HomePage() {
     queryEn?: string,
     selectedCropName?: string
   ) => {
-    const selectedCrop = resolveConversationCrop(text, selectedCropName);
+    const selectedCrop = resolveConversationCrop(selectedCropName);
     if (!selectedCrop) {
       const userMessageId = `msg-${Date.now()}`;
       const promptMessageId = `crop-selection-${Date.now() + 1}`;
@@ -652,7 +636,14 @@ export default function HomePage() {
 
   const handleSelectCropForPendingMessage = (cropName: string) => {
     const pending = pendingCropSelection;
-    if (!pending || !CROP_CONVERSATION_OPTIONS.includes(cropName)) return;
+    if (!CROP_CONVERSATION_OPTIONS.includes(cropName)) return;
+
+    if (!pending) {
+      setActiveCropName(cropName);
+      setActiveCropId(normalizeCropId(cropName));
+      setActiveConversationId(null);
+      return;
+    }
 
     setPendingCropSelection(null);
     setMessages((previous) => previous.filter(
@@ -669,6 +660,21 @@ export default function HomePage() {
       cropName
     );
   };
+
+  const needsInitialCropSelection =
+    Boolean(currentUser && !currentUser.isAnonymous && !activeCropName && !activeConversationId && messages.length === 0);
+  const cropSelectionPrompt: ChatMessage = {
+    id: 'initial-crop-selection',
+    sender: 'assistant',
+    text: language === 'te'
+      ? 'ముందుగా ఏ పంట గురించి మాట్లాడాలో ఎంచుకోండి.'
+      : 'Which crop are we talking about? Choose one to start a conversation.',
+    textTe: 'ముందుగా ఏ పంట గురించి మాట్లాడాలో ఎంచుకోండి.',
+    textEn: 'Which crop are we talking about? Choose one to start a conversation.',
+    timestamp: new Date().toISOString(),
+    cropSelectionPrompt: true,
+  };
+  const visibleMessages = needsInitialCropSelection ? [cropSelectionPrompt] : messages;
 
   return (
     <div className="min-h-screen flex flex-col bg-stone-50 dark:bg-stone-950 text-stone-900 dark:text-stone-100">
@@ -698,7 +704,7 @@ export default function HomePage() {
       {/* 2. Conversational Main Feed */}
       <main className="flex-1 flex flex-col relative overflow-hidden">
         <ChatContainer
-          messages={messages}
+          messages={visibleMessages}
           isLoading={isLoading}
           onSpeakMessage={handleSpeakMessage}
           onSelectQuickQuery={(q, qTe, qEn) => handleSendMessage(q, undefined, qTe, qEn)}

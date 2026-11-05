@@ -4,12 +4,18 @@ import { analyzeCropDisease } from '@/modules/disease/pathology';
 import { getWeatherData } from '@/modules/weather/open-meteo';
 import { calculateVerifiedTreatment } from '@/modules/treatment/calculator';
 import { queryVerifiedOutbreaks } from '@/modules/geospatial/network';
-import { getStoredDiseaseReports } from '@/modules/geospatial/firestore-alerts';
+import { createAutomatedDiseaseReport, getStoredDiseaseReports } from '@/modules/geospatial/firestore-alerts';
 import { SAMPLE_CROP_TIMELINE } from '@/modules/history/recovery-tracker';
 import { VERIFIED_PESTICIDES, searchPesticidesByQuery } from '@/config/pesticide-registry';
 import { getGeminiClient, getActiveGeminiModelName, generateAiText, generateAiMultimodal } from '@/lib/ai/gemini';
+import { getServerSessionUser } from '@/lib/firebase/server-session';
+import { PathogenCategory } from '@/types/models';
 
 export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
+
+const OUTBREAK_CROPS = new Set(['Chilli', 'Paddy', 'Cotton', 'Tomato', 'Groundnut']);
+const CONTAGIOUS_PATHOGENS = new Set<PathogenCategory>(['fungal', 'bacterial', 'viral', 'pest']);
 
 export async function POST(req: NextRequest) {
   try {
@@ -24,7 +30,7 @@ export async function POST(req: NextRequest) {
       historyContext = [],
     } = body;
 
-    const cropName = normalizeCropName(requestedCropName) || inferCropName(userMessage);
+    const cropName = normalizeCropName(requestedCropName);
     if (!cropName) {
       const textTe = 'సరైన పంటకు తగిన సలహా ఇవ్వడానికి, ముందుగా మీ పంటను ఎంచుకోండి.';
       const textEn = 'Please choose your crop first so I can give relevant advice.';
@@ -48,7 +54,11 @@ export async function POST(req: NextRequest) {
 
     // 1. IMAGE INTERACTION (Crop Pathology or Pesticide Label)
     if (imageBase64) {
-      return await handleImageInteraction(imageBase64, userMessage, language, cropName);
+      const sessionUser = await getServerSessionUser();
+      if (!sessionUser || sessionUser.firebase?.sign_in_provider === 'anonymous') {
+        return NextResponse.json({ error: 'Authentication required.' }, { status: 401 });
+      }
+      return await handleImageInteraction(imageBase64, userMessage, language, cropName, sessionUser.uid);
     }
 
     // 2. TEXT / VOICE QUERY ROUTING
@@ -143,7 +153,8 @@ async function handleImageInteraction(
   imageBase64: string,
   userMessage: string,
   language: 'te' | 'en',
-  cropName?: string
+  cropName: string | undefined,
+  reporterUid: string
 ): Promise<NextResponse> {
   const isLabelQuery =
     userMessage.toLowerCase().includes('label') ||
@@ -238,15 +249,59 @@ async function handleImageInteraction(
   const textResponseTe = `మీ ${diagnosis.cropTe} పంట ఫోటోను విశ్లేషించాను. దృశ్య లక్షణాల ప్రకారం ఇది '${diagnosis.primaryCandidate.diseaseNameTe}' (${diagnosis.primaryCandidate.scientificName}) కావడానికి అవకాశం ఉంది (విజువల్ సరిపోలిక: ${Math.round(diagnosis.primaryCandidate.symptomMatchConfidence * 100)}%). గుర్తించిన లక్షణాలు: ${evidenceTe}. ప్రాథమిక చర్య: ${adviceTe}${biologicalAdviceTe ? ` జీవ నియంత్రణ సూచన: ${biologicalAdviceTe}` : ''}`;
   const textResponseEn = `I analyzed your ${diagnosis.crop} photograph. The visual symptoms indicate '${diagnosis.primaryCandidate.diseaseNameEn}' (${diagnosis.primaryCandidate.scientificName}) with a visual match confidence of ${Math.round(diagnosis.primaryCandidate.symptomMatchConfidence * 100)}%. Observed symptoms: ${evidenceEn}. Recommended field action: ${adviceEn}${biologicalAdviceEn ? ` Biological control option: ${biologicalAdviceEn}` : ''}`;
 
-  const textResponse = language === 'te' ? textResponseTe : textResponseEn;
+  let notificationNoticeEn = '';
+  let notificationNoticeTe = '';
+  const pathogenType = diagnosis.suspectedPathogenCategory;
+  const shouldBroadcast =
+    diagnosis.success &&
+    !diagnosis.needsAdditionalAngles &&
+    diagnosis.primaryCandidate.symptomMatchConfidence >= 0.7 &&
+    CONTAGIOUS_PATHOGENS.has(pathogenType) &&
+    OUTBREAK_CROPS.has(diagnosis.crop);
+
+  if (shouldBroadcast) {
+    try {
+      const { notifiedFarmers } = await createAutomatedDiseaseReport({
+        reporterUid,
+        crop: diagnosis.crop,
+        diseaseName: diagnosis.primaryCandidate.diseaseNameEn,
+        pathogenType,
+        severity:
+          diagnosis.visualSeverity.classification === 'advanced'
+            ? 'severe'
+            : diagnosis.visualSeverity.classification === 'moderate'
+              ? 'moderate'
+              : 'low',
+        sourceDiagnosisId: diagnosis.diagnosisId,
+      });
+      notificationNoticeEn = notifiedFarmers > 0
+        ? `An AI-assisted, unverified notice was sent to ${notifiedFarmers} nearby farmer${notifiedFarmers === 1 ? '' : 's'}.`
+        : 'No other farms with saved locations were within 5 km, so no nearby notice was sent.';
+      notificationNoticeTe = notifiedFarmers > 0
+        ? `AI చిత్రం విశ్లేషణ ఆధారంగా ధృవీకరించని హెచ్చరికను సమీపంలోని ${notifiedFarmers} మంది రైతులకు పంపించాం.`
+        : 'స్థాన వివరాలు భద్రపరిచిన ఇతర పొలాలు 5 కి.మీ పరిధిలో లేవు కాబట్టి సమీప హెచ్చరిక పంపలేదు.';
+    } catch (error) {
+      console.error('Automatic outbreak notification failed:', getErrorCode(error));
+      notificationNoticeEn = 'Nearby farmers could not be notified. Please check the saved farm location and server Firebase configuration.';
+      notificationNoticeTe = 'సమీప రైతులకు హెచ్చరిక పంపలేకపోయాం. భద్రపరిచిన పొలం స్థానాన్ని, సర్వర్ Firebase అమరికను తనిఖీ చేయండి.';
+    }
+  }
+
+  const finalTextResponseTe = notificationNoticeTe
+    ? `${textResponseTe}\n\n${notificationNoticeTe}`
+    : textResponseTe;
+  const finalTextResponseEn = notificationNoticeEn
+    ? `${textResponseEn}\n\n${notificationNoticeEn}`
+    : textResponseEn;
+  const textResponse = language === 'te' ? finalTextResponseTe : finalTextResponseEn;
 
   return NextResponse.json({
     textResponse,
-    textResponseTe,
-    textResponseEn,
+    textResponseTe: finalTextResponseTe,
+    textResponseEn: finalTextResponseEn,
     spokenText: textResponse,
-    spokenTextTe: textResponseTe,
-    spokenTextEn: textResponseEn,
+    spokenTextTe: finalTextResponseTe,
+    spokenTextEn: finalTextResponseEn,
     detectedIntent: 'crop_diagnosis',
     language,
     card: {
@@ -268,6 +323,12 @@ async function handleImageInteraction(
       },
     ],
   });
+}
+
+function getErrorCode(error: unknown): string {
+  return typeof error === 'object' && error !== null && 'code' in error
+    ? String(error.code)
+    : 'unknown';
 }
 
 /**
@@ -467,7 +528,7 @@ async function handleOutbreaksQuery(
   language: 'te' | 'en',
   district: string
 ): Promise<NextResponse> {
-  const reports = await getStoredDiseaseReports('verified');
+  const reports = await getStoredDiseaseReports();
   const result = queryVerifiedOutbreaks(lat, lng, 5.0, undefined, reports);
 
   let dynamicAiText: string | null = null;
@@ -475,6 +536,7 @@ async function handleOutbreaksQuery(
     dynamicAiText = await generateAiText({
       systemInstruction: `You are the Crop Radar AI disease early-warning assistant for Andhra Pradesh (${district} district).
 Explain nearby disease outbreaks within 5 km to the farmer.
+Clearly distinguish AI-assisted, unverified reports from reports verified by an agronomist.
 Language rule: When language='te', answer strictly in 100% pure Telugu script. Never output any English words.
 When language='en', use clear English.
 Keep response concise (2-3 sentences), vigilant, and advise on immediate field boundary inspection.`,
@@ -489,13 +551,13 @@ Language: ${language}.`,
 
   const defaultTe =
     result.totalNearbyOutbreaks > 0
-      ? `మీ పొలానికి 5 కి.మీ పరిధిలో ${result.totalNearbyOutbreaks} ధృవీకరించబడిన తెగుళ్లు నమోదయ్యాయి. సమీపంలో మిరప మరియు వరి తెగుళ్లు వ్యాపిస్తున్నాయి. దయచేసి మీ పొలంలోని లేత ఆకుల అడుగుభాగంలో పురుగులు, మచ్చలు ఉన్నాయేమో పరిశీలించండి.`
-      : `మీ పొలానికి 5 కి.మీ పరిధిలో ప్రస్తుతానికి ఎటువంటి తీవ్రమైన తెగుళ్ల వ్యాప్తి నమోదు కాలేదు. పొలం సరిహద్దులను నిరంతరం పర్యవేక్షిస్తూ ఉండండి.`;
+      ? `మీ పొలానికి 5 కి.మీ పరిధిలో ${result.totalNearbyOutbreaks} పంట వ్యాధి నివేదికలు ఉన్నాయి. వీటిలో కొన్ని AI విశ్లేషణ ఆధారంగా ఉండవచ్చు, క్షేత్రస్థాయిలో ధృవీకరించబడకపోవచ్చు. లక్షణాల కోసం మీ పొలాన్ని పరిశీలించండి.`
+      : `మీ పొలానికి 5 కి.మీ పరిధిలో ప్రస్తుతం పంట వ్యాధి నివేదికలు లేవు. పొలం సరిహద్దులను పర్యవేక్షిస్తూ ఉండండి.`;
 
   const defaultEn =
     result.totalNearbyOutbreaks > 0
-      ? `There are ${result.totalNearbyOutbreaks} verified contagious disease reports within 5.0 km of your farm. Inspect your field margins and undersides of leaves immediately.`
-      : `No active verified outbreaks reported within 5.0 km of your farm.`;
+      ? `There are ${result.totalNearbyOutbreaks} nearby disease reports within 5.0 km of your farm. Some may be AI-assisted and not field-verified. Scout your field for matching symptoms.`
+      : `No active nearby disease reports were found within 5.0 km of your farm.`;
 
   const textResponseTe = language === 'te' && dynamicAiText ? dynamicAiText : defaultTe;
   const textResponseEn = language === 'en' && dynamicAiText ? dynamicAiText : defaultEn;
@@ -634,24 +696,6 @@ function normalizeCropName(value: unknown): string | undefined {
     Groundnut: ['groundnut', 'peanut', 'వేరుశనగ'],
   };
   return Object.entries(cropAliases).find(([, aliases]) => aliases.includes(normalized))?.[0];
-}
-
-function inferCropName(message: string): string | undefined {
-  const normalized = message.toLowerCase();
-  const cropAliases: Record<string, string[]> = {
-    Chilli: ['chilli', 'chili', 'మిరప'],
-    Paddy: ['paddy', 'rice', 'వరి'],
-    Cotton: ['cotton', 'పత్తి'],
-    Tomato: ['tomato', 'టమాటా', 'టమోటా'],
-    Groundnut: ['groundnut', 'peanut', 'వేరుశనగ'],
-  };
-  return Object.entries(cropAliases).find(([, aliases]) =>
-    aliases.some((alias) =>
-      /[a-z]/i.test(alias)
-        ? new RegExp(`(^|[^a-z])${alias}([^a-z]|$)`, 'i').test(normalized)
-        : normalized.includes(alias)
-    )
-  )?.[0];
 }
 
 function getTeluguCropName(cropName: string): string {

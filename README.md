@@ -63,13 +63,15 @@ FIREBASE_ADMIN_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE K
 
 The existing `NEXT_PUBLIC_FIREBASE_*` web configuration remains required for client sign-in. Firestore must be enabled and `firestore.rules` deployed. Sign-in exchanges the Firebase ID token for a five-day HttpOnly session cookie; protected app pages redirect to `/login` when the cookie is missing or invalid.
 
-Verified outbreak alerts require an agronomist account. Add authorized Firebase Auth UIDs to the server-only `.env.local` variable below, or assign the `agronomist: true` custom claim to those accounts:
+Nearby outbreak notifications are sent immediately after a signed-in farmer reports a disease; agronomist approval is not required to send them. An eligible image diagnosis also sends an AI-assisted notice when the visual match is at least 70%, additional image angles are not requested, and the suspected pathogen is fungal, bacterial, viral, or a pest. These notices are explicitly marked as not field-verified and should be treated as a reason to scout, not a confirmed outbreak. Other farmers with saved farm locations within 5 km receive in-app notifications. Exact reporter coordinates remain private.
+
+The optional agronomist setting below is only for the separate report-review workflow; it is not required to submit a report or notify nearby farmers. Add authorized Firebase Auth UIDs to the server-only `.env.local` variable, or assign the `agronomist: true` custom claim to those accounts:
 
 ```env
 AGRONOMIST_UIDS=uid-one,uid-two
 ```
 
-Farmer reports are stored as pending and do not trigger alerts until an authorized agronomist approves them. Approval creates in-app notifications for other farmers whose saved farm locations are within 5 km. The map and notification inbox show the fuzzed report area and crop-specific scouting guidance; they do not expose exact reporter coordinates or invent pesticide dosages.
+Reports are stored with their verification status, and agronomists may still review them. The map and notification inbox show the fuzzed report area and crop-specific scouting guidance; they do not expose exact reporter coordinates or invent pesticide dosages.
 
 ### Cloudinary Image Uploads
 
@@ -90,7 +92,7 @@ Images are uploaded to the `crop-radar` folder with a 10 MB limit. If these valu
 3. Before deploying, rotate any Gemini or Firebase Admin credentials that have been shared or copied into a sample file. Generate a dedicated Firebase Admin service-account key and enter its project ID, client email, and private key as `FIREBASE_ADMIN_PROJECT_ID`, `FIREBASE_ADMIN_CLIENT_EMAIL`, and `FIREBASE_ADMIN_PRIVATE_KEY`. For the private key, preserve the line breaks or enter them as `\n`; the server converts escaped newlines. Do not set `GOOGLE_APPLICATION_CREDENTIALS` to a local file path on Vercel.
 4. In Firebase Authentication, enable Google sign-in and add the Vercel production domain (and any Preview domains used for testing) to **Authorized domains**. Enable Firestore and deploy `firestore.rules` and `firestore.indexes.json` to the same Firebase project.
 5. Optionally set `AGRONOMIST_UIDS` to comma-separated Firebase Auth UIDs authorized to approve outbreak reports. Add the three `CLOUDINARY_*` variables to enable persistent image uploads; they are optional.
-6. Deploy, then smoke-test Google sign-in, a chat request, farm-location setup, and—if configured—image upload and an agronomist-approved alert. Check Vercel function logs if a server API fails.
+6. Deploy, then smoke-test Google sign-in, the initial crop-selection prompt, a chat request, farm-location setup, and an eligible disease-image diagnosis from one account; confirm a nearby account receives the unverified in-app notice. Check Vercel function logs if a server API fails.
 
 Vercel's default Next.js Node.js runtime is required for Firebase Admin API routes. No custom `vercel.json` or output-directory override is needed.
 
@@ -127,7 +129,7 @@ Open **[http://localhost:3000](http://localhost:3000)** in your browser.
 - **`crop_diagnosis` Card:** Primary suspect, scientific name, visual match percentage, observed symptom bullets, differential diagnoses, visual severity, uncertainty disclaimer, next steps.
 - **`pesticide_treatment` Card:** CIBRC product name, active ingredient, exact dosage per 16L tank, total field formulation, step-by-step arithmetic, FRAC/IRAC rotation warning, PHI days, PPE checklist.
 - **`weather_spray` Card:** Temperature, wind speed, relative humidity, spray suitability badge (OPTIMAL / MARGINAL / PROHIBITED), safe spray recommendation.
-- **`disease_outbreak_alert` Card:** Proximity distance (km), verified contagious disease, recommended preventive scouting steps.
+- **`disease_outbreak_alert` Card:** Proximity distance (km), nearby disease report status, and recommended preventive scouting steps.
 - **`crop_history` Card:** Historical timeline snapshots.
 
 ---
@@ -136,4 +138,4 @@ Open **[http://localhost:3000](http://localhost:3000)** in your browser.
 
 - **Location Privacy:** The farmer's high-precision GPS coordinates are stored privately. Public community reports are fuzzed to 1.0 km centroid grids (`fuzzCoordinatesToGrid`).
 - **Pesticide Safety Invariant:** Gemini is strictly forbidden from guessing chemical quantities. Calculations are derived deterministically from CIBRC verified registrations; unregistered applications are refused.
-- **Verification Gate:** AI predictions never trigger public outbreak notifications automatically. Reports require expert verification via the verification workflow before broadcasting.
+- **Outbreak Notices:** Eligible visual diagnoses and signed-in farmer reports can notify nearby users without agronomist approval. AI-assisted notices are labeled unverified and are limited to contagious pathogen categories and clear visual matches.

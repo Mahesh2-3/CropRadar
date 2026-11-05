@@ -43,7 +43,7 @@ export default function NotificationCenter({
                 {isTelugu ? 'సమీప పంట హెచ్చరికలు' : 'Nearby crop alerts'}
               </h2>
               <p className="text-[11px] text-stone-500">
-                {isTelugu ? 'ధృవీకరించిన నివేదికలు మాత్రమే' : 'Verified reports only'}
+                {isTelugu ? 'సమీప పంట నివేదికలు; AI నివేదికలు క్షేత్రస్థాయిలో ధృవీకరించబడవు' : 'Nearby crop reports; AI-assisted reports are not field-verified'}
               </p>
             </div>
           </div>
@@ -102,9 +102,19 @@ export default function NotificationCenter({
                       <strong>{isTelugu ? 'సూచించిన చర్య: ' : 'Suggested action: '}</strong>
                       {isTelugu ? notification.recommendedActionTe : notification.recommendedActionEn}
                     </div>
-                    <span className="mt-2 inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700 dark:text-emerald-300">
-                      <Check className="h-3 w-3" />
-                      {isTelugu ? 'వ్యవసాయ అధికారిచే ధృవీకరించబడింది' : 'Verified by an agronomist'}
+                    <span className={`mt-2 inline-flex items-center gap-1 text-[10px] font-semibold ${
+                      notification.type === 'verified-outbreak'
+                        ? 'text-emerald-700 dark:text-emerald-300'
+                        : 'text-amber-700 dark:text-amber-300'
+                    }`}>
+                      {notification.type === 'verified-outbreak' ? (
+                        <>
+                          <Check className="h-3 w-3" />
+                          {isTelugu ? 'వ్యవసాయ అధికారిచే ధృవీకరించబడింది' : 'Verified by an agronomist'}
+                        </>
+                      ) : (
+                        isTelugu ? 'క్షేత్రస్థాయిలో ధృవీకరించబడలేదు' : 'Not field-verified'
+                      )}
                     </span>
                   </div>
                 </div>
@@ -114,7 +124,7 @@ export default function NotificationCenter({
             <div className="px-5 py-12 text-center">
               <Bell className="mx-auto h-6 w-6 text-stone-300" />
               <p className="mt-3 text-xs leading-5 text-stone-500">
-                {isTelugu ? 'మీ 5 కి.మీ పరిధిలో కొత్త ధృవీకరించిన హెచ్చరికలు లేవు.' : 'No new verified alerts within 5 km of your farm.'}
+                {isTelugu ? 'మీ 5 కి.మీ పరిధిలో కొత్త పంట నివేదికలు లేవు.' : 'No new crop reports within 5 km of your farm.'}
               </p>
             </div>
           )}

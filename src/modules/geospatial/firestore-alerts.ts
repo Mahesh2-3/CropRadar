@@ -8,13 +8,50 @@ import { DiseaseReport, OutbreakSeverity, PathogenCategory } from '@/types/model
 const MAX_ALERT_RADIUS_KM = 5;
 const REPORT_RETENTION_DAYS = 30;
 
-export async function createPendingDiseaseReport(input: {
+export async function createFarmerReportedDiseaseReport(input: {
   reporterUid: string;
   crop: string;
   diseaseName: string;
   pathogenType: PathogenCategory;
   severity: OutbreakSeverity;
 }) {
+  const report = await createDiseaseReport(input, 'pending');
+  const notifiedFarmers = await dispatchOutbreakNotifications(
+    report,
+    input.reporterUid,
+    'farmer-reported-outbreak'
+  );
+  return { report, notifiedFarmers };
+}
+
+export async function createAutomatedDiseaseReport(input: {
+  reporterUid: string;
+  crop: string;
+  diseaseName: string;
+  pathogenType: PathogenCategory;
+  severity: OutbreakSeverity;
+  sourceDiagnosisId: string;
+}) {
+  const report = await createDiseaseReport(input, 'automated');
+  const notifiedFarmers = await dispatchOutbreakNotifications(
+    report,
+    input.reporterUid,
+    'ai-diagnosis-outbreak'
+  );
+  return { report, notifiedFarmers };
+}
+
+async function createDiseaseReport(
+  input: {
+    reporterUid: string;
+    crop: string;
+    diseaseName: string;
+    pathogenType: PathogenCategory;
+    severity: OutbreakSeverity;
+    sourceDiagnosisId?: string;
+  },
+  verificationStatus: DiseaseReport['verificationStatus']
+) {
   const db = getFirebaseAdminFirestore();
   const reporterProfile = await db.collection('users').doc(input.reporterUid).get();
   const farmLocation = reporterProfile.data()?.farmLocation;
@@ -40,7 +77,8 @@ export async function createPendingDiseaseReport(input: {
     diseaseNameTe: translation?.te || input.diseaseName,
     pathogenType: input.pathogenType,
     severity: input.severity,
-    verificationStatus: 'pending',
+    verificationStatus,
+    ...(input.sourceDiagnosisId ? { sourceDiagnosisId: input.sourceDiagnosisId } : {}),
     approximateLocation: {
       latitude: fuzzed.latitude,
       longitude: fuzzed.longitude,
@@ -58,7 +96,7 @@ export async function createPendingDiseaseReport(input: {
   return report;
 }
 
-export async function getStoredDiseaseReports(status?: 'pending' | 'verified' | 'rejected') {
+export async function getStoredDiseaseReports(status?: 'pending' | 'automated' | 'verified' | 'rejected') {
   let query = getFirebaseAdminFirestore().collection('diseaseReports');
   if (status) query = query.where('verificationStatus', '==', status) as typeof query;
   const snapshot = await query.limit(1000).get();
@@ -93,12 +131,30 @@ export async function verifyStoredDiseaseReport(input: {
   });
 
   if (!input.approved) {
-    return { success: true, reportId: input.reportId, notifiedFarmers: 0, message: 'Report rejected. No alerts sent.' };
+    return { success: true, reportId: input.reportId, notifiedFarmers: 0, message: 'Report rejected. No new alerts sent.' };
   }
 
   const reporter = await reportRef.collection('private').doc('reporter').get();
-  const reporterUid = reporter.data()?.uid;
-  const reporterProfile = typeof reporterUid === 'string'
+  const reporterUidValue = reporter.data()?.uid;
+  const reporterUid = typeof reporterUidValue === 'string' ? reporterUidValue : undefined;
+  const notifiedFarmers = await dispatchOutbreakNotifications(report, reporterUid, 'verified-outbreak');
+  return {
+    success: true,
+    reportId: input.reportId,
+    notifiedFarmers,
+    message: notifiedFarmers > 0
+      ? `Report verified. Nearby farmers within ${MAX_ALERT_RADIUS_KM} km were notified.`
+      : `Report verified, but no eligible farmer locations were found within ${MAX_ALERT_RADIUS_KM} km.`,
+  };
+}
+
+async function dispatchOutbreakNotifications(
+  report: DiseaseReport,
+  reporterUid: string | undefined,
+  notificationType: 'ai-diagnosis-outbreak' | 'farmer-reported-outbreak' | 'verified-outbreak'
+) {
+  const db = getFirebaseAdminFirestore();
+  const reporterProfile = reporterUid
     ? await db.collection('users').doc(reporterUid).get()
     : null;
   const reporterFarmLocation = reporterProfile?.data()?.farmLocation;
@@ -112,6 +168,7 @@ export async function verifyStoredDiseaseReport(input: {
   let batch = db.batch();
   let batchWrites = 0;
   let notifiedFarmers = 0;
+  const now = new Date().toISOString();
 
   for (const userDoc of usersSnapshot.docs) {
     if (userDoc.id === reporterUid) continue;
@@ -127,15 +184,15 @@ export async function verifyStoredDiseaseReport(input: {
     );
     if (distanceKm > MAX_ALERT_RADIUS_KM) continue;
 
-    const notificationRef = userDoc.ref.collection('notifications').doc(input.reportId);
+    const notificationRef = userDoc.ref.collection('notifications').doc(report.reportId);
     batch.set(notificationRef, {
       userId: userDoc.id,
-      type: 'verified-outbreak',
-      reportId: input.reportId,
-      titleEn: `Verified ${report.crop} disease report nearby`,
-      titleTe: `సమీపంలో ధృవీకరించిన ${report.cropTe} తెగులు నివేదిక`,
-      messageEn: `${report.diseaseName} was verified about ${distanceKm.toFixed(1)} km from your farm.`,
-      messageTe: `మీ పొలానికి సుమారు ${distanceKm.toFixed(1)} కి.మీ దూరంలో ${report.diseaseNameTe} ధృవీకరించబడింది.`,
+      type: notificationType,
+      reportId: report.reportId,
+      titleEn: getNotificationTitle(report, notificationType, 'en'),
+      titleTe: getNotificationTitle(report, notificationType, 'te'),
+      messageEn: getNotificationMessage(report, notificationType, distanceKm, 'en'),
+      messageTe: getNotificationMessage(report, notificationType, distanceKm, 'te'),
       crop: report.crop,
       cropTe: report.cropTe,
       diseaseName: report.diseaseName,
@@ -161,15 +218,52 @@ export async function verifyStoredDiseaseReport(input: {
   if (batchWrites) batches.push(batch);
   for (const pendingBatch of batches) await pendingBatch.commit();
 
-  await reportRef.update({ notificationsSentAt: now, notifiedFarmers });
-  return {
-    success: true,
-    reportId: input.reportId,
+  await db.collection('diseaseReports').doc(report.reportId).update({
+    notificationsSentAt: now,
     notifiedFarmers,
-    message: notifiedFarmers > 0
-      ? `Report verified. Nearby farmers within ${MAX_ALERT_RADIUS_KM} km were notified.`
-      : `Report verified, but no eligible farmer locations were found within ${MAX_ALERT_RADIUS_KM} km.`,
-  };
+  });
+  return notifiedFarmers;
+}
+
+function getNotificationTitle(
+  report: DiseaseReport,
+  type: 'ai-diagnosis-outbreak' | 'farmer-reported-outbreak' | 'verified-outbreak',
+  language: 'en' | 'te'
+) {
+  if (type === 'verified-outbreak') {
+    return language === 'en'
+      ? `Verified ${report.crop} disease report nearby`
+      : `సమీపంలో ధృవీకరించిన ${report.cropTe} తెగులు నివేదిక`;
+  }
+  if (type === 'ai-diagnosis-outbreak') {
+    return language === 'en'
+      ? `Possible ${report.crop} disease detected nearby`
+      : `సమీపంలో ${report.cropTe} పంట వ్యాధి లక్షణాలు గుర్తించబడ్డాయి`;
+  }
+  return language === 'en'
+    ? `New ${report.crop} disease report nearby`
+    : `సమీపంలో కొత్త ${report.cropTe} పంట వ్యాధి నివేదిక`;
+}
+
+function getNotificationMessage(
+  report: DiseaseReport,
+  type: 'ai-diagnosis-outbreak' | 'farmer-reported-outbreak' | 'verified-outbreak',
+  distanceKm: number,
+  language: 'en' | 'te'
+) {
+  if (type === 'verified-outbreak') {
+    return language === 'en'
+      ? `${report.diseaseName} was verified about ${distanceKm.toFixed(1)} km from your farm.`
+      : `మీ పొలానికి సుమారు ${distanceKm.toFixed(1)} కి.మీ దూరంలో ${report.diseaseNameTe} ధృవీకరించబడింది.`;
+  }
+  if (type === 'ai-diagnosis-outbreak') {
+    return language === 'en'
+      ? `An AI-assisted image diagnosis suggested ${report.diseaseName} about ${distanceKm.toFixed(1)} km from your farm. This report has not been field-verified.`
+      : `మీ పొలానికి సుమారు ${distanceKm.toFixed(1)} కి.మీ దూరంలో ${report.diseaseNameTe} ఉండవచ్చని AI చిత్రం విశ్లేషణ సూచించింది. ఈ నివేదిక క్షేత్రస్థాయిలో ధృవీకరించబడలేదు.`;
+  }
+  return language === 'en'
+    ? `A nearby farmer reported ${report.diseaseName} about ${distanceKm.toFixed(1)} km from your farm. This report has not been field-verified.`
+    : `మీ పొలానికి సుమారు ${distanceKm.toFixed(1)} కి.మీ దూరంలో ${report.diseaseNameTe} ఉన్నట్లు సమీప రైతు నివేదించారు. ఈ నివేదిక క్షేత్రస్థాయిలో ధృవీకరించబడలేదు.`;
 }
 
 function getPrecaution(report: DiseaseReport) {

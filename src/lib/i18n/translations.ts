@@ -117,7 +117,7 @@ export const TRANSLATIONS = {
     outbreaks: {
       en: 'Any nearby disease alerts? 📡',
       te: 'చుట్టుపక్కల తెగుళ్ల హెచ్చరికలు ఉన్నాయా? 📡',
-      queryEn: 'Are there any verified disease outbreaks near my farm?',
+      queryEn: 'Are there any nearby disease reports?',
       queryTe: 'మా ప్రాంతంలో ఇతర పొలాల్లో ఏవైనా తెగుళ్లు వ్యాపిస్తున్నాయా?',
     },
     history: {
@@ -163,7 +163,7 @@ export const TRANSLATIONS = {
       te: 'మీ పొలం స్థానాన్ని నిర్ధారించండి',
     },
     description: {
-      en: 'Crop Radar needs your farm location to provide accurate local weather spray windows and verified disease outbreak alerts within your perimeter.',
+      en: 'Crop Radar needs your farm location to provide accurate local weather spray windows and nearby disease report notices.',
       te: 'మీ ప్రాంతానికి సరైన పిచికారీ వాతావరణం మరియు చుట్టుపక్కల తెగుళ్ల హెచ్చరికలను అందించడానికి మీ పొలం ఉన్న జిల్లా లేదా మండలం అవసరం.',
     },
     detectGPS: {
@@ -203,8 +203,8 @@ export const TRANSLATIONS = {
       te: 'తెగుళ్ల ముందస్తు హెచ్చరిక దూరం',
     },
     alertRadiusDesc: {
-      en: 'Receive early warnings when verified contagious crop diseases are reported within this distance from your farm.',
-      te: 'మీ పొలం నుండి ఈ పరిధిలో ధృవీకరించబడిన తెగుళ్లు నమోదైతే వెంటనే మీకు హెచ్చరిక అందుతుంది.',
+      en: 'Receive nearby disease report notices within this distance; AI-assisted reports are not field-verified.',
+      te: 'ఈ పరిధిలోని పంట వ్యాధి నివేదికల హెచ్చరికలు అందుతాయి; AI నివేదికలు క్షేత్రస్థాయిలో ధృవీకరించబడవు.',
     },
     activeCropsTitle: {
       en: 'Your Primary Crops',
