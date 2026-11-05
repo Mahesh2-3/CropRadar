@@ -127,6 +127,7 @@ export interface UnifiedAssistantResponse {
   spokenTextEn?: string;
   detectedIntent: ContextualCardType | 'general_agronomy';
   language: LanguageCode;
+  requiresCropSelection?: boolean;
   card?: {
     type: ContextualCardType;
     data: any;

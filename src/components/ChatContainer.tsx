@@ -20,6 +20,8 @@ import {
   Thermometer,
   ShieldCheck,
   Zap,
+  MapPin,
+  Bell,
 } from 'lucide-react';
 
 export interface ChatMessage {
@@ -35,6 +37,7 @@ export interface ChatMessage {
     type: ContextualCardType;
     data: any;
   };
+  cropSelectionPrompt?: boolean;
   timestamp: string;
 }
 
@@ -43,6 +46,7 @@ interface ChatContainerProps {
   isLoading: boolean;
   onSpeakMessage: (msg: ChatMessage) => void;
   onSelectQuickQuery: (query: string, queryTe?: string, queryEn?: string) => void;
+  onSelectCrop: (cropName: string) => void;
 }
 
 export default function ChatContainer({
@@ -50,9 +54,17 @@ export default function ChatContainer({
   isLoading,
   onSpeakMessage,
   onSelectQuickQuery,
+  onSelectCrop,
 }: ChatContainerProps) {
   const { language, t } = useLanguage();
   const bottomRef = useRef<HTMLDivElement>(null);
+  const cropOptions = [
+    { name: 'Chilli', labelTe: 'మిరప' },
+    { name: 'Paddy', labelTe: 'వరి' },
+    { name: 'Cotton', labelTe: 'పత్తి' },
+    { name: 'Tomato', labelTe: 'టమాటా' },
+    { name: 'Groundnut', labelTe: 'వేరుశనగ' },
+  ];
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -174,6 +186,21 @@ export default function ChatContainer({
                 </div>
               )}
 
+              {msg.cropSelectionPrompt && (
+                <div className="flex flex-wrap gap-2">
+                  {cropOptions.map((crop) => (
+                    <button
+                      key={crop.name}
+                      type="button"
+                      onClick={() => onSelectCrop(crop.name)}
+                      className="rounded-full border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-900 transition-colors hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-100 dark:hover:bg-emerald-900"
+                    >
+                      {language === 'te' ? crop.labelTe : crop.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+
               {/* Assistant Actions Bar: Listen / Replay */}
               {msg.sender === 'assistant' && (
                 <div className="pt-2 border-t border-stone-100 dark:border-stone-800 flex items-center justify-between text-xs">
@@ -217,6 +244,9 @@ export default function ChatContainer({
 
 function DiagnosisCard({ data, language }: { data: any; language: 'te' | 'en' }) {
   const isTe = language === 'te';
+  const biologicalAdvice = isTe
+    ? data.recommendedActionOverview?.biologicalOptionTe || data.recommendedActionOverview?.biologicalOption
+    : data.recommendedActionOverview?.biologicalOption;
   return (
     <div className="bg-stone-50 dark:bg-stone-950 border border-stone-200 dark:border-stone-800 rounded-2xl p-4 space-y-3 text-xs">
       <div className="flex items-start justify-between">
@@ -266,6 +296,24 @@ function DiagnosisCard({ data, language }: { data: any; language: 'te' | 'en' })
         </p>
       </div>
 
+      {biologicalAdvice && (
+        <div className="rounded-xl border border-sky-200 bg-sky-50 p-3 text-sky-950 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-100">
+          <strong className="mb-1 block text-[11px]">
+            {isTe ? 'జీవ నియంత్రణ సూచన:' : 'Biological control option:'}
+          </strong>
+          <p>{biologicalAdvice}</p>
+        </div>
+      )}
+
+      {data.recommendedActionOverview?.chemicalGuidanceRef && (
+        <div className="rounded-xl border border-purple-200 bg-purple-50 p-3 text-purple-950 dark:border-purple-900 dark:bg-purple-950/40 dark:text-purple-100">
+          <strong className="mb-1 block text-[11px]">
+            {isTe ? 'రసాయన మందుల భద్రత:' : 'Chemical treatment safety:'}
+          </strong>
+          <p>{data.recommendedActionOverview.chemicalGuidanceRef}</p>
+        </div>
+      )}
+
       {/* Uncertainty Notice */}
       <div className="p-2.5 bg-amber-50 dark:bg-amber-950/40 rounded-xl border border-amber-200 dark:border-amber-800 flex items-start gap-2 text-[11px] text-amber-800 dark:text-amber-200">
         <Info className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
@@ -278,6 +326,7 @@ function DiagnosisCard({ data, language }: { data: any; language: 'te' | 'en' })
     </div>
   );
 }
+
 
 function TreatmentCard({ data, language }: { data: any; language: 'te' | 'en' }) {
   const isTe = language === 'te';
@@ -328,6 +377,7 @@ function TreatmentCard({ data, language }: { data: any; language: 'te' | 'en' })
   );
 }
 
+
 function WeatherCard({ data, language }: { data: any; language: 'te' | 'en' }) {
   const isTe = language === 'te';
   const cur = data.currentConditions;
@@ -376,6 +426,7 @@ function WeatherCard({ data, language }: { data: any; language: 'te' | 'en' }) {
   );
 }
 
+
 function OutbreakAlertCard({ data, language }: { data: any; language: 'te' | 'en' }) {
   const isTe = language === 'te';
   const first = data.nearbyReports?.[0];
@@ -411,6 +462,7 @@ function OutbreakAlertCard({ data, language }: { data: any; language: 'te' | 'en
     </div>
   );
 }
+
 
 function HistorySummaryCard({ data, language }: { data: any; language: 'te' | 'en' }) {
   const isTe = language === 'te';

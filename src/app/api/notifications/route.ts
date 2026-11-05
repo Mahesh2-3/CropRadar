@@ -23,6 +23,7 @@ export async function GET() {
       .orderBy('createdAt', 'desc')
       .limit(50)
       .get();
+
     const notifications: NotificationRecord[] = snapshot.docs.map((document) => ({
       id: document.id,
       ...document.data(),

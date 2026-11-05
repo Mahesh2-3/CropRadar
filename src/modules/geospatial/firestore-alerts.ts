@@ -98,6 +98,14 @@ export async function verifyStoredDiseaseReport(input: {
 
   const reporter = await reportRef.collection('private').doc('reporter').get();
   const reporterUid = reporter.data()?.uid;
+  const reporterProfile = typeof reporterUid === 'string'
+    ? await db.collection('users').doc(reporterUid).get()
+    : null;
+  const reporterFarmLocation = reporterProfile?.data()?.farmLocation;
+  // Use exact coordinates only for private matching; notifications keep the fuzzed location.
+  const alertOrigin = isCoordinate(reporterFarmLocation?.latitude) && isCoordinate(reporterFarmLocation?.longitude)
+    ? { latitude: reporterFarmLocation.latitude, longitude: reporterFarmLocation.longitude }
+    : report.approximateLocation;
   const usersSnapshot = await db.collection('users').get();
   const advice = getPrecaution(report);
   const batches: Array<ReturnType<typeof db.batch>> = [];
@@ -114,8 +122,8 @@ export async function verifyStoredDiseaseReport(input: {
     const distanceKm = calculateHaversineDistanceKm(
       location.latitude,
       location.longitude,
-      report.approximateLocation.latitude,
-      report.approximateLocation.longitude
+      alertOrigin.latitude,
+      alertOrigin.longitude
     );
     if (distanceKm > MAX_ALERT_RADIUS_KM) continue;
 
@@ -158,7 +166,9 @@ export async function verifyStoredDiseaseReport(input: {
     success: true,
     reportId: input.reportId,
     notifiedFarmers,
-    message: `Report verified. Nearby farmers within ${MAX_ALERT_RADIUS_KM} km were notified.`,
+    message: notifiedFarmers > 0
+      ? `Report verified. Nearby farmers within ${MAX_ALERT_RADIUS_KM} km were notified.`
+      : `Report verified, but no eligible farmer locations were found within ${MAX_ALERT_RADIUS_KM} km.`,
   };
 }
 

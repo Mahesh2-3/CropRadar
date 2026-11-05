@@ -9,14 +9,14 @@ interface RouteContext {
 }
 
 export async function PATCH(_request: Request, context: RouteContext) {
-  const sessionUser = await getServerSessionUser();
-  if (!sessionUser || sessionUser.firebase?.sign_in_provider === 'anonymous') {
-    return NextResponse.json({ error: 'Authentication required.' }, { status: 401 });
-  }
-
   const { notificationId } = await context.params;
   if (!/^[\w-]{1,140}$/.test(notificationId)) {
     return NextResponse.json({ error: 'Invalid notification ID.' }, { status: 400 });
+  }
+
+  const sessionUser = await getServerSessionUser();
+  if (!sessionUser || sessionUser.firebase?.sign_in_provider === 'anonymous') {
+    return NextResponse.json({ error: 'Authentication required.' }, { status: 401 });
   }
 
   try {
@@ -32,7 +32,7 @@ export async function PATCH(_request: Request, context: RouteContext) {
     await notificationRef.update({ read: true });
     return NextResponse.json({ success: true });
   } catch (error) {
-    console.error('Notification update failed:', getErrorCode(error));
+    console.error('Notification read update failed:', getErrorCode(error));
     return NextResponse.json({ error: 'Unable to update notification.' }, { status: 500 });
   }
 }

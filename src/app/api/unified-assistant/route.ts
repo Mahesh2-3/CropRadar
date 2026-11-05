@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { UnifiedAssistantRequest, UnifiedAssistantResponse, ContextualCardType } from '@/types/api';
+import { UnifiedAssistantRequest, ContextualCardType } from '@/types/api';
 import { analyzeCropDisease } from '@/modules/disease/pathology';
 import { getWeatherData } from '@/modules/weather/open-meteo';
 import { calculateVerifiedTreatment } from '@/modules/treatment/calculator';
@@ -24,14 +24,31 @@ export async function POST(req: NextRequest) {
       historyContext = [],
     } = body;
 
+    const cropName = normalizeCropName(requestedCropName) || inferCropName(userMessage);
+    if (!cropName) {
+      const textTe = 'సరైన పంటకు తగిన సలహా ఇవ్వడానికి, ముందుగా మీ పంటను ఎంచుకోండి.';
+      const textEn = 'Please choose your crop first so I can give relevant advice.';
+      const textResponse = language === 'te' ? textTe : textEn;
+      return NextResponse.json({
+        textResponse,
+        textResponseTe: textTe,
+        textResponseEn: textEn,
+        spokenText: textResponse,
+        spokenTextTe: textTe,
+        spokenTextEn: textEn,
+        detectedIntent: 'general_agronomy',
+        language,
+        requiresCropSelection: true,
+      });
+    }
+
     const lat = farmLocation?.latitude || 16.3067;
     const lng = farmLocation?.longitude || 80.4365;
     const district = farmLocation?.district || 'Guntur';
-    const cropName = normalizeCropName(requestedCropName);
 
     // 1. IMAGE INTERACTION (Crop Pathology or Pesticide Label)
     if (imageBase64) {
-      return await handleImageInteraction(imageBase64, userMessage, language, lat, lng, district, cropName);
+      return await handleImageInteraction(imageBase64, userMessage, language, cropName);
     }
 
     // 2. TEXT / VOICE QUERY ROUTING
@@ -126,9 +143,6 @@ async function handleImageInteraction(
   imageBase64: string,
   userMessage: string,
   language: 'te' | 'en',
-  lat: number,
-  lng: number,
-  district: string,
   cropName?: string
 ): Promise<NextResponse> {
   const isLabelQuery =
@@ -217,9 +231,12 @@ async function handleImageInteraction(
   const adviceEn =
     diagnosis.recommendedActionOverview.culturalAdvice ||
     'Follow recommended cultural practices and vector sanitation.';
+  const biologicalAdviceTe = diagnosis.recommendedActionOverview.biologicalOptionTe ||
+    diagnosis.recommendedActionOverview.biologicalOption;
+  const biologicalAdviceEn = diagnosis.recommendedActionOverview.biologicalOption;
 
-  const textResponseTe = `మీ ${diagnosis.cropTe} పంట ఫోటోను విశ్లేషించాను. దృశ్య లక్షణాల ప్రకారం ఇది '${diagnosis.primaryCandidate.diseaseNameTe}' (${diagnosis.primaryCandidate.scientificName}) కావడానికి అవకాశం ఉంది (విజువల్ సరిపోలిక: ${Math.round(diagnosis.primaryCandidate.symptomMatchConfidence * 100)}%). గుర్తించిన లక్షణాలు: ${evidenceTe}. ప్రాథమిక యాజమాన్యం: ${adviceTe}`;
-  const textResponseEn = `I analyzed your ${diagnosis.crop} photograph. The visual symptoms indicate '${diagnosis.primaryCandidate.diseaseNameEn}' (${diagnosis.primaryCandidate.scientificName}) with a visual match confidence of ${Math.round(diagnosis.primaryCandidate.symptomMatchConfidence * 100)}%. Observed symptoms: ${evidenceEn}. Recommended field action: ${adviceEn}`;
+  const textResponseTe = `మీ ${diagnosis.cropTe} పంట ఫోటోను విశ్లేషించాను. దృశ్య లక్షణాల ప్రకారం ఇది '${diagnosis.primaryCandidate.diseaseNameTe}' (${diagnosis.primaryCandidate.scientificName}) కావడానికి అవకాశం ఉంది (విజువల్ సరిపోలిక: ${Math.round(diagnosis.primaryCandidate.symptomMatchConfidence * 100)}%). గుర్తించిన లక్షణాలు: ${evidenceTe}. ప్రాథమిక చర్య: ${adviceTe}${biologicalAdviceTe ? ` జీవ నియంత్రణ సూచన: ${biologicalAdviceTe}` : ''}`;
+  const textResponseEn = `I analyzed your ${diagnosis.crop} photograph. The visual symptoms indicate '${diagnosis.primaryCandidate.diseaseNameEn}' (${diagnosis.primaryCandidate.scientificName}) with a visual match confidence of ${Math.round(diagnosis.primaryCandidate.symptomMatchConfidence * 100)}%. Observed symptoms: ${evidenceEn}. Recommended field action: ${adviceEn}${biologicalAdviceEn ? ` Biological control option: ${biologicalAdviceEn}` : ''}`;
 
   const textResponse = language === 'te' ? textResponseTe : textResponseEn;
 
@@ -570,7 +587,8 @@ Strict Requirements:
 1. When language is 'te', you MUST answer in 100% pure, natural, respectful Telugu script. Never output any English words or headings.
 2. When language is 'en', answer in clear, accessible English.
 3. Keep answers concise (2-3 sentences), actionable, and practical for rural farmers with limited literacy.
-4. Zero hallucination: Never invent unverified chemical dosages.`,
+4. When a farmer describes a crop problem, explain the likely cause with uncertainty, give immediate low-risk field or cultural actions, and say what observation or photo would help confirm it.
+5. Never invent chemical dosages or claim a treatment is verified unless it comes from the registered-label calculation engine.`,
       prompt: `Crop for this conversation: ${cropName || 'not specified'}.
     Recent conversation:
     ${historyContext
@@ -618,6 +636,24 @@ function normalizeCropName(value: unknown): string | undefined {
   return Object.entries(cropAliases).find(([, aliases]) => aliases.includes(normalized))?.[0];
 }
 
+function inferCropName(message: string): string | undefined {
+  const normalized = message.toLowerCase();
+  const cropAliases: Record<string, string[]> = {
+    Chilli: ['chilli', 'chili', 'మిరప'],
+    Paddy: ['paddy', 'rice', 'వరి'],
+    Cotton: ['cotton', 'పత్తి'],
+    Tomato: ['tomato', 'టమాటా', 'టమోటా'],
+    Groundnut: ['groundnut', 'peanut', 'వేరుశనగ'],
+  };
+  return Object.entries(cropAliases).find(([, aliases]) =>
+    aliases.some((alias) =>
+      /[a-z]/i.test(alias)
+        ? new RegExp(`(^|[^a-z])${alias}([^a-z]|$)`, 'i').test(normalized)
+        : normalized.includes(alias)
+    )
+  )?.[0];
+}
+
 function getTeluguCropName(cropName: string): string {
   const cropNames: Record<string, string> = {
     Chilli: 'మిరప',
@@ -627,4 +663,243 @@ function getTeluguCropName(cropName: string): string {
     Groundnut: 'వేరుశనగ',
   };
   return cropNames[cropName] || cropName;
+}
+
+interface DetectedDiseaseMention {
+  diseaseKey: string;
+  diseaseNameEn: string;
+  diseaseNameTe: string;
+  crop: string;
+  cropTe: string;
+  severity: 'mild' | 'moderate' | 'severe';
+}
+
+function detectCropDiseaseMention(userMessage: string, currentCrop?: string): DetectedDiseaseMention | null {
+  if (!userMessage || typeof userMessage !== 'string') return null;
+  const q = userMessage.toLowerCase();
+
+  // Determine severity from keywords
+  const isSevere =
+    q.includes('తీవ్ర') ||
+    q.includes('ఎక్కువ') ||
+    q.includes('చాలా') ||
+    q.includes('severe') ||
+    q.includes('heavy') ||
+    q.includes('critical') ||
+    q.includes('huge') ||
+    q.includes('badly');
+
+  const severity: 'mild' | 'moderate' | 'severe' = isSevere ? 'severe' : 'moderate';
+
+  // Disease 1: Rice Blast
+  if (
+    q.includes('blast') ||
+    q.includes('magnaporthe') ||
+    q.includes('pyricularia') ||
+    q.includes('అగ్గి తెగులు') ||
+    q.includes('అగ్గితెగులు') ||
+    q.includes('బ్లాస్ట్') ||
+    (q.includes('అగ్గి') && (q.includes('వరి') || q.includes('వరిలో') || q.includes('చేను')))
+  ) {
+    return {
+      diseaseKey: 'Rice Blast',
+      diseaseNameEn: 'Rice Blast (Magnaporthe oryzae)',
+      diseaseNameTe: 'వరి అగ్గి తెగులు',
+      crop: 'Paddy',
+      cropTe: 'వరి',
+      severity,
+    };
+  }
+
+  // Disease 2: Bacterial Leaf Blight
+  if (
+    q.includes('bacterial leaf blight') ||
+    q.includes('leaf blight') ||
+    q.includes('blb') ||
+    q.includes('xanthomonas') ||
+    q.includes('బాక్టీరియా ఆకు ఎండు') ||
+    q.includes('బాక్టీరియల్ ఆకు ఎండు') ||
+    q.includes('ఆకు ఎండు తెగులు') ||
+    q.includes('ఆకు ఎండు') ||
+    q.includes('ఎండ్ర తెగులు')
+  ) {
+    return {
+      diseaseKey: 'Bacterial Leaf Blight',
+      diseaseNameEn: 'Bacterial Leaf Blight (Xanthomonas oryzae)',
+      diseaseNameTe: 'బాక్టీరియా ఆకు ఎండు తెగులు',
+      crop: 'Paddy',
+      cropTe: 'వరి',
+      severity,
+    };
+  }
+
+  // Disease 3: Brown Spot
+  if (
+    q.includes('brown spot') ||
+    q.includes('bipolaris') ||
+    q.includes('గోధుమ రంగు మచ్చ') ||
+    q.includes('గోధుమ మచ్చ') ||
+    q.includes('గోధుమమచ్చ') ||
+    q.includes('బ్రౌన్ స్పాట్')
+  ) {
+    return {
+      diseaseKey: 'Brown Spot',
+      diseaseNameEn: 'Brown Spot (Bipolaris oryzae)',
+      diseaseNameTe: 'గోధుమ రంగు మచ్చ తెగులు',
+      crop: 'Paddy',
+      cropTe: 'వరి',
+      severity,
+    };
+  }
+
+  // Disease 4: False Smut
+  if (
+    q.includes('false smut') ||
+    q.includes('smut') ||
+    q.includes('ustilaginoidea') ||
+    q.includes('కాటుక తెగులు') ||
+    q.includes('కాటుక') ||
+    q.includes('ఫాల్స్ స్మట్')
+  ) {
+    return {
+      diseaseKey: 'False Smut',
+      diseaseNameEn: 'False Smut (Ustilaginoidea virens)',
+      diseaseNameTe: 'కాటుక తెగులు / బూజు తెగులు',
+      crop: 'Paddy',
+      cropTe: 'వరి',
+      severity,
+    };
+  }
+
+  // Disease 5: Sheath Blight
+  if (
+    q.includes('sheath blight') ||
+    q.includes('rhizoctonia') ||
+    q.includes('కాండం కుళ్లు') ||
+    q.includes('కాండం కుళ్ళు') ||
+    q.includes('పొడ తెగులు') ||
+    q.includes('షీత్ బ్లైట్')
+  ) {
+    return {
+      diseaseKey: 'Sheath Blight',
+      diseaseNameEn: 'Sheath Blight (Rhizoctonia solani)',
+      diseaseNameTe: 'వరి కాండం కుళ్లు తెగులు',
+      crop: 'Paddy',
+      cropTe: 'వరి',
+      severity,
+    };
+  }
+
+  // Disease 6: Chilli Leaf Curl Virus
+  if (
+    q.includes('leaf curl') ||
+    q.includes('begomovirus') ||
+    q.includes('chilli leaf curl') ||
+    q.includes('curling') ||
+    q.includes('ఆకు ముడత') ||
+    q.includes('ఆకుముడత') ||
+    q.includes('ముడత తెగులు') ||
+    q.includes('ముడత') ||
+    q.includes('జెమిని వైరస్') ||
+    q.includes('లీఫ్ కర్ల్')
+  ) {
+    return {
+      diseaseKey: 'Chilli Leaf Curl Virus',
+      diseaseNameEn: 'Chilli Leaf Curl Virus (Begomovirus)',
+      diseaseNameTe: 'మిరప ఆకు ముడత వైరస్',
+      crop: 'Chilli',
+      cropTe: 'మిరప',
+      severity,
+    };
+  }
+
+  // Disease 7: Anthracnose / Die back / Fruit Rot
+  if (
+    q.includes('anthracnose') ||
+    q.includes('die back') ||
+    q.includes('dieback') ||
+    q.includes('fruit rot') ||
+    q.includes('colletotrichum') ||
+    q.includes('కొమ్మ ఎండు') ||
+    q.includes('కాయ కుళ్లు') ||
+    q.includes('కాయ కుళ్ళు') ||
+    q.includes('పండు కుళ్లు') ||
+    q.includes('పండు కుళ్ళు') ||
+    q.includes('ఆంథ్రాక్నోస్') ||
+    q.includes('డై బ్యాక్')
+  ) {
+    return {
+      diseaseKey: 'Anthracnose / Die back',
+      diseaseNameEn: 'Anthracnose / Fruit Rot (Colletotrichum capsici)',
+      diseaseNameTe: 'కొమ్మ ఎండు తెగులు / పండు కుళ్లు',
+      crop: 'Chilli',
+      cropTe: 'మిరప',
+      severity,
+    };
+  }
+
+  // Disease 8: Powdery Mildew
+  if (
+    q.includes('powdery mildew') ||
+    q.includes('mildew') ||
+    q.includes('leveillula') ||
+    q.includes('బూడిద తెగులు') ||
+    q.includes('బూజు తెగులు') ||
+    q.includes('బూడిద') ||
+    q.includes('పౌడరీ మిల్డో')
+  ) {
+    const crop = currentCrop || 'Chilli';
+    const cropTe = getTeluguCropName(crop);
+    return {
+      diseaseKey: 'Powdery Mildew',
+      diseaseNameEn: 'Powdery Mildew (Leveillula taurica)',
+      diseaseNameTe: 'బూడిద తెగులు',
+      crop,
+      cropTe,
+      severity,
+    };
+  }
+
+  // Disease 9: Bacterial Leaf Spot
+  if (
+    q.includes('bacterial leaf spot') ||
+    q.includes('bacterial spot') ||
+    q.includes('బాక్టీరియా ఆకుమచ్చ') ||
+    q.includes('బాక్టీరియల్ మచ్చ') ||
+    q.includes('ఆకుమచ్చ') ||
+    q.includes('ఆకు మచ్చ')
+  ) {
+    const crop = currentCrop || 'Chilli';
+    const cropTe = getTeluguCropName(crop);
+    return {
+      diseaseKey: 'Bacterial Leaf Spot',
+      diseaseNameEn: 'Bacterial Leaf Spot (Xanthomonas campestris)',
+      diseaseNameTe: 'బాక్టీరియా ఆకుమచ్చ తెగులు',
+      crop,
+      cropTe,
+      severity,
+    };
+  }
+
+  // Disease 10: Thrips
+  if (
+    q.includes('thrips') ||
+    q.includes('scirtothrips') ||
+    q.includes('తామర పురుగులు') ||
+    q.includes('తామర పురుగు') ||
+    q.includes('తామర') ||
+    q.includes('నల్లి') ||
+    q.includes('పేనుబంక')
+  ) {
+    return {
+      diseaseKey: 'Thrips Infestation',
+      diseaseNameEn: 'Thrips Damage (Scirtothrips dorsalis)',
+      diseaseNameTe: 'తామర పురుగుల ఉధృతి',
+      crop: currentCrop || 'Chilli',
+      cropTe: getTeluguCropName(currentCrop || 'Chilli'),
+      severity,
+    };
+  }
+
+  return null;
 }

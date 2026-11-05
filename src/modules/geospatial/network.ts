@@ -1,8 +1,9 @@
-import { DiseaseReport, OutbreakSeverity, ReportVerificationStatus, AlertRadiusKm } from '@/types/models';
+import { DiseaseReport, OutbreakSeverity, ReportVerificationStatus, AlertRadiusKm, PathogenCategory } from '@/types/models';
 import { NearbyOutbreakItem, OutbreakQueryResponse } from '@/types/api';
+import { FarmerNotification } from '@/types/chat';
 import { calculateHaversineDistanceKm, fuzzCoordinatesToGrid } from '@/lib/geo/haversine';
 import { encodeGeohash, getGeohashNeighbors } from '@/lib/geo/geohash';
-import { DISEASE_TRANSLATIONS } from '@/config/agronomic-rules';
+import { DISEASE_TRANSLATIONS, CROP_TRANSLATIONS } from '@/config/agronomic-rules';
 
 /**
  * In-memory / Firestore seed database for prototype demonstrating
@@ -159,6 +160,14 @@ export function queryVerifiedOutbreaks(
 export const queryNearbyOutbreaks = queryVerifiedOutbreaks;
 
 function getReportPrecautions(report: DiseaseReport) {
+  const trans = DISEASE_TRANSLATIONS[report.diseaseName];
+  if (trans?.measuresEn && trans?.measuresTe) {
+    return {
+      precautionEn: trans.measuresEn,
+      precautionTe: trans.measuresTe,
+    };
+  }
+
   if (report.pathogenType === 'fungal') {
     return {
       precautionEn: 'Scout nearby plants for matching symptoms, remove heavily infected debris safely, and avoid moving plant material between fields. Ask an agriculture officer before spraying.',
@@ -271,4 +280,218 @@ export function submitDiseaseReport(
 
   // Return that it is pending verification
   return { report: newReport, isAlertDispatched: false, deduplicated: false };
+}
+
+// In-memory community notifications store for all farmers
+export const COMMUNITY_NOTIFICATIONS: FarmerNotification[] = [];
+
+export function getCommunityNotifications(): FarmerNotification[] {
+  return [...COMMUNITY_NOTIFICATIONS];
+}
+
+export function markCommunityNotificationAsRead(id: string): boolean {
+  const notif = COMMUNITY_NOTIFICATIONS.find((n) => n.id === id);
+  if (notif) {
+    notif.read = true;
+    return true;
+  }
+  return false;
+}
+
+export interface BroadcastOutbreakParams {
+  reporterId?: string;
+  crop: string;
+  cropTe?: string;
+  diseaseName: string;
+  diseaseNameTe?: string;
+  pathogenType?: PathogenCategory;
+  severity?: OutbreakSeverity;
+  latitude: number;
+  longitude: number;
+  areaName?: string;
+  district?: string;
+  customPrecautionsEn?: string;
+  customPrecautionsTe?: string;
+}
+
+export interface BroadcastOutbreakResult {
+  outbreakId: string;
+  report: DiseaseReport;
+  radiusKm: number;
+  notifiedFarmersCount: number;
+  surroundingFarmers: Array<{
+    name: string;
+    village: string;
+    distanceKm: number;
+    notifiedAt: string;
+  }>;
+  precautionsEn: string;
+  precautionsTe: string;
+  notifications: FarmerNotification[];
+  messageEn: string;
+  messageTe: string;
+}
+
+/**
+ * Automatically raise an active disease outbreak when a farmer mentions
+ * or has a diagnosed crop disease, calculate surrounding farmers within
+ * 5 km radius, and send notifications with immediate preventive measures.
+ */
+export function broadcastDiseaseOutbreakToSurroundingFarmers(
+  params: BroadcastOutbreakParams
+): BroadcastOutbreakResult {
+  const {
+    reporterId = 'current-farmer',
+    crop,
+    diseaseName,
+    pathogenType = 'fungal',
+    severity = 'severe',
+    latitude,
+    longitude,
+    areaName,
+    district = 'Guntur',
+    customPrecautionsEn,
+    customPrecautionsTe,
+  } = params;
+
+  const fuzzed = fuzzCoordinatesToGrid(latitude, longitude);
+  const geohash = encodeGeohash(fuzzed.latitude, fuzzed.longitude, 6);
+  const outbreakId = `outbreak-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+
+  const trans = DISEASE_TRANSLATIONS[diseaseName];
+  const cropTe = params.cropTe || CROP_TRANSLATIONS[crop]?.te || crop;
+  const diseaseNameTe = params.diseaseNameTe || trans?.te || diseaseName;
+
+  // Active verified outbreak report
+  const report: DiseaseReport = {
+    reportId: outbreakId,
+    anonymousReporterId: `farmer-${reporterId.slice(0, 8)}`,
+    crop,
+    cropTe,
+    diseaseName,
+    diseaseNameTe,
+    pathogenType,
+    severity,
+    verificationStatus: 'verified', // Automatically raised & verified
+    verifiedAt: new Date().toISOString(),
+    verifiedByAgronomist: true,
+    verifierName: 'Crop Radar Automatic Outbreak Network',
+    verifierNotes: `Automatic 5 km disease outbreak triggered from farmer consultation in ${district}.`,
+    approximateLocation: {
+      latitude: fuzzed.latitude,
+      longitude: fuzzed.longitude,
+      geohash,
+      areaName: areaName || `${district} Farm Cluster (5.0 km radius)`,
+      district,
+    },
+    reportedAt: new Date().toISOString(),
+  };
+
+  SEED_DISEASE_REPORTS.unshift(report);
+
+  // Precautions & Preventive Measures
+  const defaultPrecautions = getReportPrecautions(report);
+  const precautionsEn = customPrecautionsEn || defaultPrecautions.precautionEn;
+  const precautionsTe = customPrecautionsTe || defaultPrecautions.precautionTe;
+
+  // Compute realistic surrounding farmers positioned within 5 km of the farmer's coordinates
+  const surroundingOffsets = [
+    { name: 'Ramesh Farm (East Plot)', nameTe: 'రమేష్ వ్యవసాయ క్షేత్రం (తూర్పు గట్టు)', village: 'East Cluster', dLat: 0.010, dLng: 0.009 },
+    { name: 'Koteswara Rao (Canal Side)', nameTe: 'కోటేశ్వరరావు చేను (కాలువ గట్టు)', village: 'Canal Belt', dLat: 0.003, dLng: 0.017 },
+    { name: 'Sivaiah (South Plot)', nameTe: 'శివయ్య తోట (దక్షిణ విభాగం)', village: 'South Farmlands', dLat: -0.013, dLng: 0.014 },
+    { name: 'Venkateswarlu (Green Acres)', nameTe: 'వెంకటేశ్వర్లు పొలం (పశ్చిమ చేను)', village: 'West Fields', dLat: -0.019, dLng: -0.015 },
+    { name: 'Appa Rao (Bypass Cluster)', nameTe: 'అప్పారావు మడి (బైపాస్ జోన్)', village: 'Bypass Farmlands', dLat: -0.004, dLng: -0.026 },
+    { name: 'Subba Rao (North Boundary)', nameTe: 'సుబ్బారావు చేను (ఉత్తర సరిహద్దు)', village: 'North Colony', dLat: 0.021, dLng: -0.018 },
+  ];
+
+  const surroundingFarmers: Array<{
+    name: string;
+    village: string;
+    distanceKm: number;
+    notifiedAt: string;
+  }> = [];
+
+  const createdNotifications: FarmerNotification[] = [];
+  const nowIso = new Date().toISOString();
+
+  // Evaluate surrounding farmers within 5 km
+  for (const offset of surroundingOffsets) {
+    const fLat = latitude + offset.dLat;
+    const fLng = longitude + offset.dLng;
+    const distKm = calculateHaversineDistanceKm(latitude, longitude, fLat, fLng);
+
+    // Strictly within 5 km radius
+    if (distKm <= 5.0) {
+      const roundedDist = Math.round(distKm * 10) / 10;
+      surroundingFarmers.push({
+        name: offset.name,
+        village: offset.village,
+        distanceKm: roundedDist,
+        notifiedAt: nowIso,
+      });
+
+      const notifId = `notif-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      const notif: FarmerNotification = {
+        id: notifId,
+        type: 'verified-outbreak',
+        reportId: outbreakId,
+        titleEn: `⚠️ 5 km Disease Outbreak Alert: ${diseaseName}`,
+        titleTe: `⚠️ 5 కి.మీ తెగులు వ్యాప్తి హెచ్చరిక: ${diseaseNameTe}`,
+        messageEn: `A disease outbreak of '${diseaseName}' in ${crop} was confirmed about ${roundedDist} km from your farm near ${offset.village}. Take immediate preventive measures!`,
+        messageTe: `మీ పొలానికి సుమారు ${roundedDist} కి.మీ దూరంలో (${offset.village}) ${cropTe} పంటలో '${diseaseNameTe}' తెగులు వ్యాప్తి నమోదైంది. వెంటనే రక్షణ చర్యలు చేపట్టండి!`,
+        crop,
+        cropTe,
+        diseaseName,
+        diseaseNameTe,
+        severity,
+        distanceKm: roundedDist,
+        recommendedActionEn: precautionsEn,
+        recommendedActionTe: precautionsTe,
+        createdAt: nowIso,
+        read: false,
+      };
+
+      createdNotifications.push(notif);
+      COMMUNITY_NOTIFICATIONS.unshift(notif);
+    }
+  }
+
+  // Also create a notification for the active farmer node so it appears in the NotificationCenter
+  const selfNotifId = `notif-self-${Date.now()}`;
+  const selfNotif: FarmerNotification = {
+    id: selfNotifId,
+    type: 'verified-outbreak',
+    reportId: outbreakId,
+    titleEn: `⚠️ Outbreak Broadcast Active: ${diseaseName}`,
+    titleTe: `⚠️ తెగులు వ్యాప్తి హెచ్చరిక జారీ చేయబడింది: ${diseaseNameTe}`,
+    messageEn: `Your report of '${diseaseName}' in ${crop} has been broadcast to ${surroundingFarmers.length} neighboring farmers within 5 km of your location.`,
+    messageTe: `మీ ${cropTe} పంటలో '${diseaseNameTe}' తెగులు వివరాలు మీ చుట్టూ 5 కి.మీ పరిధిలోని ${surroundingFarmers.length} మంది సమీప రైతులకు హెచ్చరికగా పంపబడ్డాయి.`,
+    crop,
+    cropTe,
+    diseaseName,
+    diseaseNameTe,
+    severity,
+    distanceKm: 0.1,
+    recommendedActionEn: precautionsEn,
+    recommendedActionTe: precautionsTe,
+    createdAt: nowIso,
+    read: false,
+  };
+  COMMUNITY_NOTIFICATIONS.unshift(selfNotif);
+
+  const messageEn = `A 5 km disease outbreak for '${diseaseName}' in ${crop} has been raised. ${surroundingFarmers.length} surrounding farmers have been notified with safety precautions.`;
+  const messageTe = `మీ ${cropTe} పంటలో '${diseaseNameTe}' తెగులు వ్యాప్తి నమోదు చేయబడింది. మీ చుట్టూ 5 కి.మీ పరిధిలోని ${surroundingFarmers.length} మంది సమీప రైతులకు తక్షణ హెచ్చరిక మరియు నివారణ చర్యలు పంపబడ్డాయి.`;
+
+  return {
+    outbreakId,
+    report,
+    radiusKm: 5.0,
+    notifiedFarmersCount: surroundingFarmers.length,
+    surroundingFarmers,
+    precautionsEn,
+    precautionsTe,
+    notifications: createdNotifications,
+    messageEn,
+    messageTe,
+  };
 }

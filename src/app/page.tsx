@@ -44,6 +44,15 @@ const DEFAULT_FARM_LOCATION: LocationCoordinate = {
 
 const CROP_CONVERSATION_OPTIONS = ['Chilli', 'Paddy', 'Cotton', 'Tomato', 'Groundnut'];
 
+interface PendingCropSelection {
+  text: string;
+  imageBase64?: string;
+  queryTe?: string;
+  queryEn?: string;
+  userMessageId: string;
+  promptMessageId: string;
+}
+
 function normalizeCropId(cropName: string): string {
   return cropName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
@@ -72,6 +81,7 @@ export default function HomePage() {
   const [activeCropId, setActiveCropId] = useState<string | null>(null);
   const [activeCropName, setActiveCropName] = useState<string | null>(null);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [pendingCropSelection, setPendingCropSelection] = useState<PendingCropSelection | null>(null);
   const [crops, setCrops] = useState<ChatCropSummary[]>([]);
   const [isLoadingConversations, setIsLoadingConversations] = useState(false);
   const [conversationError, setConversationError] = useState<string | null>(null);
@@ -240,6 +250,7 @@ export default function HomePage() {
   };
 
   const handleNewConversation = (cropName: string) => {
+    setPendingCropSelection(null);
     setActiveCropName(cropName);
     setActiveCropId(normalizeCropId(cropName));
     setActiveConversationId(null);
@@ -262,6 +273,7 @@ export default function HomePage() {
       setActiveCropId(cropId);
       setActiveCropName(selectedCrop.name);
       setActiveConversationId(conversationId);
+      setPendingCropSelection(null);
       setIsConversationSidebarOpen(false);
     } catch (error) {
       console.error('Unable to load conversation messages:', error);
@@ -294,11 +306,19 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!currentUser || currentUser.isAnonymous) return;
-    const intervalId = window.setInterval(() => void refreshNotifications(), 60_000);
-    return () => window.clearInterval(intervalId);
+    const refreshOnFocus = () => void refreshNotifications();
+    window.addEventListener('focus', refreshOnFocus);
+    const intervalId = window.setInterval(refreshOnFocus, 30_000);
+    return () => {
+      window.removeEventListener('focus', refreshOnFocus);
+      window.clearInterval(intervalId);
+    };
   }, [currentUser?.uid]);
 
-  const resolveConversationCrop = (message: string) => {
+  const resolveConversationCrop = (message: string, selectedCropName?: string) => {
+    if (selectedCropName) {
+      return { cropId: normalizeCropId(selectedCropName), cropName: selectedCropName };
+    }
     if (activeCropName && activeCropId) {
       return { cropId: activeCropId, cropName: activeCropName };
     }
@@ -311,9 +331,14 @@ export default function HomePage() {
       { name: 'Tomato', aliases: ['tomato', 'టమాటా', 'టమోటా'] },
       { name: 'Groundnut', aliases: ['groundnut', 'peanut', 'వేరుశనగ'] },
     ];
-    const matchedCrop = cropAliases.find((crop) => crop.aliases.some((alias) => lowerMessage.includes(alias)));
-    const cropName = matchedCrop?.name || activeCrops[0] || 'Paddy';
-    return { cropId: normalizeCropId(cropName), cropName };
+    const matchedCrop = cropAliases.find((crop) => crop.aliases.some((alias) =>
+      /[a-z]/i.test(alias)
+        ? new RegExp(`(^|[^a-z])${alias}([^a-z]|$)`, 'i').test(lowerMessage)
+        : lowerMessage.includes(alias)
+    ));
+    return matchedCrop
+      ? { cropId: normalizeCropId(matchedCrop.name), cropName: matchedCrop.name }
+      : undefined;
   };
 
   // When language changes, stop active speech and auto-translate any messages missing target language
@@ -419,8 +444,55 @@ export default function HomePage() {
     text: string,
     imageBase64?: string,
     queryTe?: string,
-    queryEn?: string
+    queryEn?: string,
+    selectedCropName?: string
   ) => {
+    const selectedCrop = resolveConversationCrop(text, selectedCropName);
+    if (!selectedCrop) {
+      const userMessageId = `msg-${Date.now()}`;
+      const promptMessageId = `crop-selection-${Date.now() + 1}`;
+      const userMsg: ChatMessage = {
+        id: userMessageId,
+        sender: 'farmer',
+        text,
+        textTe: queryTe || (language === 'te' ? text : undefined),
+        textEn: queryEn || (language === 'en' ? text : undefined),
+        spokenTextTe: queryTe || (language === 'te' ? text : undefined),
+        spokenTextEn: queryEn || (language === 'en' ? text : undefined),
+        imageBase64,
+        timestamp: new Date().toISOString(),
+      };
+      const promptTe = 'సరైన సలహా ఇవ్వడానికి, ముందుగా ఈ సమస్య ఏ పంటలో ఉందో ఎంచుకోండి.';
+      const promptEn = 'Which crop is affected? Choose one so I can give relevant advice.';
+      setMessages((previous) => [
+        ...previous.filter((message) =>
+          !pendingCropSelection ||
+          (message.id !== pendingCropSelection.userMessageId &&
+            message.id !== pendingCropSelection.promptMessageId)
+        ),
+        userMsg,
+        {
+          id: promptMessageId,
+          sender: 'assistant',
+          text: language === 'te' ? promptTe : promptEn,
+          textTe: promptTe,
+          textEn: promptEn,
+          timestamp: new Date().toISOString(),
+          cropSelectionPrompt: true,
+        },
+      ]);
+      setPendingCropSelection({
+        text,
+        imageBase64,
+        queryTe,
+        queryEn,
+        userMessageId,
+        promptMessageId,
+      });
+      setAttachedImage(null);
+      return;
+    }
+
     const userMsgId = `msg-${Date.now()}`;
     const userMsg: ChatMessage = {
       id: userMsgId,
@@ -438,9 +510,7 @@ export default function HomePage() {
     setAttachedImage(null);
     setIsLoading(true);
     setCloudinaryUploadFailed(false);
-
     try {
-      const selectedCrop = resolveConversationCrop(text);
       if (!activeConversationId) {
         setActiveCropId(selectedCrop.cropId);
         setActiveCropName(selectedCrop.cropName);
@@ -580,6 +650,26 @@ export default function HomePage() {
     }
   };
 
+  const handleSelectCropForPendingMessage = (cropName: string) => {
+    const pending = pendingCropSelection;
+    if (!pending || !CROP_CONVERSATION_OPTIONS.includes(cropName)) return;
+
+    setPendingCropSelection(null);
+    setMessages((previous) => previous.filter(
+      (message) => message.id !== pending.userMessageId && message.id !== pending.promptMessageId
+    ));
+    setActiveCropName(cropName);
+    setActiveCropId(normalizeCropId(cropName));
+    setActiveConversationId(null);
+    void handleSendMessage(
+      pending.text,
+      pending.imageBase64,
+      pending.queryTe,
+      pending.queryEn,
+      cropName
+    );
+  };
+
   return (
     <div className="min-h-screen flex flex-col bg-stone-50 dark:bg-stone-950 text-stone-900 dark:text-stone-100">
       {/* 1. Ultra-Clean Header */}
@@ -612,6 +702,7 @@ export default function HomePage() {
           isLoading={isLoading}
           onSpeakMessage={handleSpeakMessage}
           onSelectQuickQuery={(q, qTe, qEn) => handleSendMessage(q, undefined, qTe, qEn)}
+          onSelectCrop={handleSelectCropForPendingMessage}
         />
       </main>
 

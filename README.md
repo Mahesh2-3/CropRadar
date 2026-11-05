@@ -32,7 +32,7 @@ Crop Radar has been transformed from a multi-page dashboard into a **simple, con
                                   ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │             CENTRAL AI COMPANION ORCHESTRATION LAYER             │
-│   /api/unified-assistant & Google AI Studio (Gemini 2.5 Flash)   │
+│   /api/unified-assistant & Google AI Studio (Gemini)             │
 │   - Visual pathology extraction & differential diagnosis         │
 │   - Pesticide label OCR entity matching against CIBRC catalog    │
 │   - Pure Telugu acoustic translation and conversational synthesis│
@@ -83,18 +83,23 @@ CLOUDINARY_API_SECRET=your-api-secret
 
 Images are uploaded to the `crop-radar` folder with a 10 MB limit. If these values are missing, image analysis still runs, but Cloudinary storage reports an upload warning.
 
-### 1. Run the Core Verification Suite (25 / 25 Passing)
-```powershell
-npm.cmd run test:engines
-```
-*Validates weather drift rules, deterministic pesticide calculations, unregistered chemical refusal, Haversine 5km filtering, Geohash L6 indexing, GPS privacy fuzzing, agronomist report verification workflow, resistance MoA audits, crop recovery delta scoring, and 100% Telugu localization coverage across all 13 Andhra Pradesh districts.*
+### Deploy to Vercel
 
-### 2. Build for Production
+1. Push the project to GitHub and import the repository in Vercel. Keep the project root at the repository root and use the detected Next.js framework settings (`npm install` and `npm run build`).
+2. In **Project Settings → Environment Variables**, add the values from `.env.local.example` for Production and any Preview environments you plan to use. Do not upload `.env` or `.env.local`. `NEXT_PUBLIC_*` Firebase web settings are included in browser code; Gemini, Firebase Admin, and Cloudinary credentials must remain server-only.
+3. Before deploying, rotate any Gemini or Firebase Admin credentials that have been shared or copied into a sample file. Generate a dedicated Firebase Admin service-account key and enter its project ID, client email, and private key as `FIREBASE_ADMIN_PROJECT_ID`, `FIREBASE_ADMIN_CLIENT_EMAIL`, and `FIREBASE_ADMIN_PRIVATE_KEY`. For the private key, preserve the line breaks or enter them as `\n`; the server converts escaped newlines. Do not set `GOOGLE_APPLICATION_CREDENTIALS` to a local file path on Vercel.
+4. In Firebase Authentication, enable Google sign-in and add the Vercel production domain (and any Preview domains used for testing) to **Authorized domains**. Enable Firestore and deploy `firestore.rules` and `firestore.indexes.json` to the same Firebase project.
+5. Optionally set `AGRONOMIST_UIDS` to comma-separated Firebase Auth UIDs authorized to approve outbreak reports. Add the three `CLOUDINARY_*` variables to enable persistent image uploads; they are optional.
+6. Deploy, then smoke-test Google sign-in, a chat request, farm-location setup, and—if configured—image upload and an agronomist-approved alert. Check Vercel function logs if a server API fails.
+
+Vercel's default Next.js Node.js runtime is required for Firebase Admin API routes. No custom `vercel.json` or output-directory override is needed.
+
+### Verify the Production Build
 ```powershell
 npm.cmd run build
 ```
 
-### 3. Start Development Server
+### Start Development Server
 ```powershell
 npm.cmd run dev
 ```
