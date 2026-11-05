@@ -4,6 +4,7 @@ import { getServerSessionUser } from '@/lib/firebase/server-session';
 import {
   createFarmerReportedDiseaseReport,
   getStoredDiseaseReports,
+  extractCoordinates,
 } from '@/modules/geospatial/firestore-alerts';
 import { queryVerifiedOutbreaks } from '@/modules/geospatial/network';
 import { OutbreakSeverity, PathogenCategory } from '@/types/models';
@@ -15,7 +16,7 @@ const ALLOWED_PATHOGENS = new Set<PathogenCategory>(['fungal', 'bacterial', 'vir
 const ALLOWED_SEVERITIES = new Set<OutbreakSeverity>(['low', 'moderate', 'severe']);
 
 export async function GET(request: NextRequest) {
-  const sessionUser = await getServerSessionUser();
+  const sessionUser = await getServerSessionUser(request);
   if (!sessionUser || sessionUser.firebase?.sign_in_provider === 'anonymous') {
     return NextResponse.json({ error: 'Authentication required.' }, { status: 401 });
   }
@@ -26,12 +27,8 @@ export async function GET(request: NextRequest) {
       .doc(sessionUser.uid)
       .get();
     const profile = profileSnapshot.data();
-    const farmLocation = profile?.farmLocation;
-    if (
-      profile?.locationSetupComplete !== true ||
-      !isCoordinate(farmLocation?.latitude) ||
-      !isCoordinate(farmLocation?.longitude)
-    ) {
+    const coords = extractCoordinates(profile);
+    if (!coords) {
       return NextResponse.json(
         { error: 'Farm location setup is required.', code: 'location-required' },
         { status: 409 }
@@ -43,8 +40,8 @@ export async function GET(request: NextRequest) {
     const crop = request.nextUrl.searchParams.get('crop') || undefined;
     const reports = await getStoredDiseaseReports();
     const result = queryVerifiedOutbreaks(
-      farmLocation.latitude,
-      farmLocation.longitude,
+      coords.latitude,
+      coords.longitude,
       radiusKm,
       crop,
       reports
@@ -57,7 +54,7 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const sessionUser = await getServerSessionUser();
+  const sessionUser = await getServerSessionUser(request);
   if (!sessionUser || sessionUser.firebase?.sign_in_provider === 'anonymous') {
     return NextResponse.json({ error: 'Authentication required.' }, { status: 401 });
   }
@@ -88,6 +85,7 @@ export async function POST(request: NextRequest) {
       diseaseName,
       pathogenType,
       severity,
+      farmLocation: body.farmLocation,
     });
 
     return NextResponse.json({

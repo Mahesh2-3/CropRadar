@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { onAuthStateChanged, User } from 'firebase/auth';
+import { collection, onSnapshot } from 'firebase/firestore';
 import Header from '@/components/Header';
 import ChatContainer, { ChatMessage } from '@/components/ChatContainer';
 import MessageComposer from '@/components/MessageComposer';
@@ -23,7 +24,7 @@ import {
   saveConversationMessage,
 } from '@/lib/conversations';
 import { UnifiedAssistantResponse } from '@/types/api';
-import { auth, firebaseReady } from '@/lib/firebase/client';
+import { auth, db, firebaseReady } from '@/lib/firebase/client';
 import {
   ensureFarmerProfile,
   signInWithGoogle,
@@ -122,7 +123,9 @@ export default function HomePage() {
   const refreshNotifications = async () => {
     setIsLoadingNotifications(true);
     try {
-      const response = await fetch('/api/notifications', { credentials: 'same-origin' });
+      const idToken = currentUser ? await currentUser.getIdToken().catch(() => null) : null;
+      const headers: HeadersInit = idToken ? { Authorization: `Bearer ${idToken}` } : {};
+      const response = await fetch('/api/notifications', { credentials: 'same-origin', headers });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Unable to load notifications.');
       setNotifications(result.notifications || []);
@@ -173,10 +176,24 @@ export default function HomePage() {
 
       try {
         if (user.isAnonymous) return;
-          const profile = await ensureFarmerProfile(
-            user,
-            hasSavedFarmLocation ? initialFarmLocation : undefined
-          );
+
+        // Ensure server session cookie is established
+        try {
+          const idToken = await user.getIdToken();
+          await fetch('/api/auth/session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ idToken }),
+          });
+        } catch (sessionErr) {
+          console.warn('Session cookie sync error:', sessionErr);
+        }
+
+        const profile = await ensureFarmerProfile(
+          user,
+          hasSavedFarmLocation ? initialFarmLocation : DEFAULT_FARM_LOCATION
+        );
         if (!isMounted || !profile) return;
 
         const savedFarmLocation = toFarmLocation(profile);
@@ -304,12 +321,42 @@ export default function HomePage() {
     }
   };
 
+  // Real-time Firestore notification listener for surrounding farmer outbreaks
   useEffect(() => {
-    if (!currentUser || currentUser.isAnonymous) return;
+    if (!currentUser || currentUser.isAnonymous || !db) return;
+
+    let unsubscribeFirestore: (() => void) | undefined;
+    try {
+      const userNotifCol = collection(db, 'users', currentUser.uid, 'notifications');
+      unsubscribeFirestore = onSnapshot(
+        userNotifCol,
+        (snapshot) => {
+          const loaded = snapshot.docs.map((docSnap) => ({
+            id: docSnap.id,
+            ...docSnap.data(),
+          })) as FarmerNotification[];
+          loaded.sort((a, b) => {
+            const timeA = typeof a.createdAt === 'string' ? Date.parse(a.createdAt) : 0;
+            const timeB = typeof b.createdAt === 'string' ? Date.parse(b.createdAt) : 0;
+            return timeB - timeA;
+          });
+          setNotifications(loaded);
+          setUnreadNotificationCount(loaded.filter((n) => !n.read).length);
+        },
+        (snapshotErr) => {
+          console.warn('Real-time notifications onSnapshot warning:', snapshotErr);
+        }
+      );
+    } catch (err) {
+      console.warn('Could not attach real-time notifications listener:', err);
+    }
+
     const refreshOnFocus = () => void refreshNotifications();
     window.addEventListener('focus', refreshOnFocus);
-    const intervalId = window.setInterval(refreshOnFocus, 30_000);
+    const intervalId = window.setInterval(refreshOnFocus, 10_000);
+
     return () => {
+      if (unsubscribeFirestore) unsubscribeFirestore();
       window.removeEventListener('focus', refreshOnFocus);
       window.clearInterval(intervalId);
     };
@@ -559,9 +606,13 @@ export default function HomePage() {
         }
       }
 
+      const idToken = currentUser ? await currentUser.getIdToken().catch(() => null) : null;
       const res = await fetch('/api/unified-assistant', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+        },
         body: JSON.stringify({
           userMessage: text,
           imageBase64,
@@ -594,10 +645,15 @@ export default function HomePage() {
         spokenTextTe: data.spokenTextTe || (language === 'te' ? data.spokenText : undefined),
         spokenTextEn: data.spokenTextEn || (language === 'en' ? data.spokenText : undefined),
         card: data.card,
+        outbreakTriggered: Boolean(data.outbreakTriggered),
         timestamp: new Date().toISOString(),
       };
 
       setMessages((prev) => [...prev, assistantMsg]);
+
+      if (data.outbreakTriggered || (data.notificationsCreated && data.notificationsCreated > 0)) {
+        void refreshNotifications();
+      }
 
       if (conversationId && conversationCropId) {
         try {

@@ -92,7 +92,7 @@ export default function NotificationCenter({
                     </p>
                     <div className="mt-2 flex items-center gap-1.5 text-[10px] text-stone-500">
                       <MapPin className="h-3 w-3" />
-                      <span>{notification.distanceKm.toFixed(1)} km</span>
+                      <span>{(Number.isFinite(Number(notification.distanceKm)) ? Number(notification.distanceKm) : 0).toFixed(1)} km</span>
                       <span>·</span>
                       <span>{isTelugu ? notification.cropTe : notification.crop}</span>
                       <span>·</span>

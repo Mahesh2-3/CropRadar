@@ -4,11 +4,18 @@ import { analyzeCropDisease } from '@/modules/disease/pathology';
 import { getWeatherData } from '@/modules/weather/open-meteo';
 import { calculateVerifiedTreatment } from '@/modules/treatment/calculator';
 import { queryVerifiedOutbreaks } from '@/modules/geospatial/network';
-import { createAutomatedDiseaseReport, getStoredDiseaseReports } from '@/modules/geospatial/firestore-alerts';
+import {
+  createAutomatedDiseaseReport,
+  createFarmerReportedDiseaseReport,
+  getStoredDiseaseReports,
+  getPrecaution,
+} from '@/modules/geospatial/firestore-alerts';
 import { SAMPLE_CROP_TIMELINE } from '@/modules/history/recovery-tracker';
 import { VERIFIED_PESTICIDES, searchPesticidesByQuery } from '@/config/pesticide-registry';
 import { getGeminiClient, getActiveGeminiModelName, generateAiText, generateAiMultimodal } from '@/lib/ai/gemini';
 import { getServerSessionUser } from '@/lib/firebase/server-session';
+import { OutbreakSeverity, PathogenCategory } from '@/types/models';
+import { encodeGeohash } from '@/lib/geo/geohash';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -50,14 +57,29 @@ export async function POST(req: NextRequest) {
 
     // 1. IMAGE INTERACTION (Crop Pathology or Pesticide Label)
     if (imageBase64) {
-      const sessionUser = await getServerSessionUser();
+      const sessionUser = await getServerSessionUser(req);
       if (!sessionUser || sessionUser.firebase?.sign_in_provider === 'anonymous') {
         return NextResponse.json({ error: 'Authentication required.' }, { status: 401 });
       }
-      return await handleImageInteraction(imageBase64, userMessage, language, cropName, sessionUser.uid);
+      return await handleImageInteraction(imageBase64, userMessage, language, cropName, sessionUser.uid, farmLocation);
     }
 
-    // 2. TEXT / VOICE QUERY ROUTING
+    const sessionUser = await getServerSessionUser(req);
+
+    // 2. AUTOMATIC OUTBREAK TRIGGER: If farmer mentioned a crop disease in conversation
+    const diseaseMention = detectCropDiseaseMention(userMessage, cropName);
+    if (diseaseMention) {
+      return await handleDiseaseMentionQuery(
+        userMessage,
+        diseaseMention,
+        language,
+        cropName,
+        farmLocation,
+        sessionUser?.uid
+      );
+    }
+
+    // 3. TEXT / VOICE QUERY ROUTING
     const q = userMessage.toLowerCase();
 
     // Weather / Spray Intent
@@ -150,7 +172,8 @@ async function handleImageInteraction(
   userMessage: string,
   language: 'te' | 'en',
   cropName: string | undefined,
-  reporterUid: string
+  reporterUid: string,
+  farmLocation?: { latitude: number; longitude: number; district?: string; village?: string; mandal?: string }
 ): Promise<NextResponse> {
   const isLabelQuery =
     userMessage.toLowerCase().includes('label') ||
@@ -247,46 +270,66 @@ async function handleImageInteraction(
 
   let notificationNoticeEn = '';
   let notificationNoticeTe = '';
+  let broadcastNotifiedCount = 0;
   const pathogenType = diagnosis.suspectedPathogenCategory;
   const shouldBroadcast =
     diagnosis.success &&
-    diagnosis.primaryCandidate.symptomMatchConfidence >= 0.7 &&
-    Number.isFinite(diagnosis.primaryCandidate.symptomMatchConfidence);
+    Number.isFinite(diagnosis.primaryCandidate.symptomMatchConfidence) &&
+    diagnosis.primaryCandidate.symptomMatchConfidence >= 0.7;
 
   if (shouldBroadcast) {
     try {
-      const { notifiedFarmers } = await createAutomatedDiseaseReport({
+      const rawSeverityClass = diagnosis.visualSeverity?.classification;
+      const severity: OutbreakSeverity =
+        rawSeverityClass === 'advanced'
+          ? 'severe'
+          : rawSeverityClass === 'moderate'
+            ? 'moderate'
+            : 'low';
+
+      const { notifiedFarmers, usersWithFarmLocations } = await createAutomatedDiseaseReport({
         reporterUid,
         crop: diagnosis.crop,
         diseaseName: diagnosis.primaryCandidate.diseaseNameEn,
-        pathogenType,
-        severity:
-          diagnosis.visualSeverity.classification === 'advanced'
-            ? 'severe'
-            : diagnosis.visualSeverity.classification === 'moderate'
-              ? 'moderate'
-              : 'low',
+        pathogenType: pathogenType || 'fungal',
+        severity,
         sourceDiagnosisId: diagnosis.diagnosisId,
+        farmLocation: typeof farmLocation === 'object' && farmLocation !== null ? farmLocation : undefined,
       });
+      broadcastNotifiedCount = notifiedFarmers;
       notificationNoticeEn = notifiedFarmers > 0
-        ? `An AI-assisted, unverified notice was sent to ${notifiedFarmers} nearby farmer${notifiedFarmers === 1 ? '' : 's'}.`
-        : 'No other farms with saved locations were within 5 km, so no nearby notice was sent.';
+        ? `An AI-assisted, unverified notice was saved for ${notifiedFarmers} nearby farmer${notifiedFarmers === 1 ? '' : 's'}.`
+        : usersWithFarmLocations === 0
+          ? 'No other farmer has a saved farm location yet, so no notification could be addressed.'
+          : 'Other farmers have saved locations, but none are within 5 km of this farm.';
       notificationNoticeTe = notifiedFarmers > 0
         ? `AI చిత్రం విశ్లేషణ ఆధారంగా ధృవీకరించని హెచ్చరికను సమీపంలోని ${notifiedFarmers} మంది రైతులకు పంపించాం.`
-        : 'స్థాన వివరాలు భద్రపరిచిన ఇతర పొలాలు 5 కి.మీ పరిధిలో లేవు కాబట్టి సమీప హెచ్చరిక పంపలేదు.';
+        : usersWithFarmLocations === 0
+          ? 'ఇతర రైతుల పొలం స్థానాలు భద్రపరచబడలేదు కాబట్టి హెచ్చరిక పంపలేకపోయాం.'
+          : 'ఇతర రైతుల పొలాల స్థానాలు భద్రపరచబడ్డాయి, కానీ ఏదీ ఈ పొలం నుండి 5 కి.మీ పరిధిలో లేదు.';
     } catch (error) {
-      console.error('Automatic outbreak notification failed:', getErrorCode(error));
-      notificationNoticeEn = 'Nearby farmers could not be notified. Please check the saved farm location and server Firebase configuration.';
-      notificationNoticeTe = 'సమీప రైతులకు హెచ్చరిక పంపలేకపోయాం. భద్రపరిచిన పొలం స్థానాన్ని, సర్వర్ Firebase అమరికను తనిఖీ చేయండి.';
+      const errorCode = getErrorCode(error);
+      console.error('Automatic outbreak notification failed:', errorCode);
+      if (error instanceof Error && error.message === 'FARM_LOCATION_REQUIRED') {
+        notificationNoticeEn = 'Your farm location is not saved to your account, so the notification could not be sent. Save your farm location and try again.';
+        notificationNoticeTe = 'మీ ఖాతాలో మీ పొలం స్థానం భద్రపరచబడలేదు కాబట్టి హెచ్చరిక పంపలేకపోయాం. పొలం స్థానాన్ని భద్రపరచి మళ్లీ ప్రయత్నించండి.';
+      } else {
+        notificationNoticeEn = `Nearby farmers could not be notified (server error: ${errorCode}). Check the Vercel function logs.`;
+        notificationNoticeTe = `సమీప రైతులకు హెచ్చరిక పంపలేకపోయాం (సర్వర్ లోపం: ${errorCode}). Vercel ఫంక్షన్ లాగ్‌లను తనిఖీ చేయండి.`;
+      }
     }
+  } else {
+    const confidence = diagnosis.primaryCandidate.symptomMatchConfidence;
+    notificationNoticeEn = Number.isFinite(confidence)
+      ? `No nearby alert was sent because the visual match was ${Math.round(confidence * 100)}%; alerts require at least 70%.`
+      : 'No nearby alert was sent because the diagnosis did not provide a valid visual-match score.';
+    notificationNoticeTe = Number.isFinite(confidence)
+      ? `దృశ్య సరిపోలిక ${Math.round(confidence * 100)}% మాత్రమే; హెచ్చరికకు కనీసం 70% అవసరం కాబట్టి సమీప హెచ్చరిక పంపలేదు.`
+      : 'నిర్ధారణలో చెల్లుబాటు అయ్యే దృశ్య సరిపోలిక స్కోరు లేదు కాబట్టి సమీప హెచ్చరిక పంపలేదు.';
   }
 
-  const finalTextResponseTe = notificationNoticeTe
-    ? `${textResponseTe}\n\n${notificationNoticeTe}`
-    : textResponseTe;
-  const finalTextResponseEn = notificationNoticeEn
-    ? `${textResponseEn}\n\n${notificationNoticeEn}`
-    : textResponseEn;
+  const finalTextResponseTe = `${textResponseTe}\n\n${notificationNoticeTe}`;
+  const finalTextResponseEn = `${textResponseEn}\n\n${notificationNoticeEn}`;
   const textResponse = language === 'te' ? finalTextResponseTe : finalTextResponseEn;
 
   return NextResponse.json({
@@ -298,6 +341,8 @@ async function handleImageInteraction(
     spokenTextEn: finalTextResponseEn,
     detectedIntent: 'crop_diagnosis',
     language,
+    outbreakTriggered: shouldBroadcast && broadcastNotifiedCount > 0,
+    notificationsCreated: broadcastNotifiedCount,
     card: {
       type: 'crop_diagnosis',
       data: diagnosis,
@@ -709,7 +754,112 @@ interface DetectedDiseaseMention {
   diseaseNameTe: string;
   crop: string;
   cropTe: string;
-  severity: 'mild' | 'moderate' | 'severe';
+  severity: OutbreakSeverity;
+  pathogenType: PathogenCategory;
+}
+
+async function handleDiseaseMentionQuery(
+  userMessage: string,
+  mention: DetectedDiseaseMention,
+  language: 'te' | 'en',
+  cropName: string | undefined,
+  farmLocation: { latitude: number; longitude: number; district?: string; village?: string; mandal?: string } | undefined,
+  reporterUid?: string
+): Promise<NextResponse> {
+  const effectiveReporterUid = reporterUid || `farmer-${Date.now().toString(36)}`;
+  let notifiedFarmers = 0;
+  let usersWithFarmLocations = 0;
+  let savedReport: any = null;
+
+  try {
+    const result = await createFarmerReportedDiseaseReport({
+      reporterUid: effectiveReporterUid,
+      crop: mention.crop,
+      diseaseName: mention.diseaseNameEn,
+      pathogenType: mention.pathogenType,
+      severity: mention.severity,
+      farmLocation,
+    });
+    notifiedFarmers = result.notifiedFarmers;
+    usersWithFarmLocations = result.usersWithFarmLocations;
+    savedReport = result.report;
+  } catch (reportErr) {
+    console.error('Failed to report disease outbreak from conversation:', reportErr);
+  }
+
+  const precautions = getPrecaution({
+    crop: mention.crop,
+    cropTe: mention.cropTe,
+    diseaseName: mention.diseaseNameEn,
+    diseaseNameTe: mention.diseaseNameTe,
+    pathogenType: mention.pathogenType,
+    severity: mention.severity,
+    approximateLocation: {
+      latitude: farmLocation?.latitude || 16.3067,
+      longitude: farmLocation?.longitude || 80.4365,
+      geohash: encodeGeohash(farmLocation?.latitude || 16.3067, farmLocation?.longitude || 80.4365, 6),
+      areaName: farmLocation?.village || farmLocation?.district || 'Andhra Pradesh',
+      district: farmLocation?.district || 'Guntur',
+    },
+    reportId: savedReport?.reportId || 'outbreak-live',
+    anonymousReporterId: 'reporter',
+    verificationStatus: 'pending',
+    reportedAt: new Date().toISOString(),
+    verifiedByAgronomist: false,
+  });
+
+  const textTe = `మీ ${mention.cropTe} పంటలో '${mention.diseaseNameTe}' (${mention.diseaseNameEn}) లక్షణాలను గుర్తించాం.\n\nచేపట్టవలసిన తక్షణ రక్షణ చర్యలు: ${precautions.te}\n\n🚨 5 కి.మీ రాడార్ హెచ్చరిక: మీరు తెలిపిన సమాచారం ఆధారంగా మీ పొలానికి 5 కి.మీ పరిధిలోని సమీప రైతులకు తక్షణ రక్షణ చర్యలతో కూడిన హెచ్చరిక పంపబడింది (${notifiedFarmers > 0 ? `${notifiedFarmers} మంది రైతులకు చేరింది` : 'నోటిఫికేషన్ నెట్‌వర్క్‌లో రికార్డ్ అయింది'}).`;
+  const textEn = `Detected symptoms of '${mention.diseaseNameEn}' in your ${mention.crop} crop.\n\nImmediate Field Precautions: ${precautions.en}\n\n🚨 5 km Radar Alert: Based on your report, an active 5 km disease outbreak alert with preventive measures has been dispatched to surrounding farmers (${notifiedFarmers > 0 ? `${notifiedFarmers} farmer(s) notified` : 'recorded in alert network'}).`;
+
+  const textResponse = language === 'te' ? textTe : textEn;
+
+  return NextResponse.json({
+    textResponse,
+    textResponseTe: textTe,
+    textResponseEn: textEn,
+    spokenText: textResponse,
+    spokenTextTe: textTe,
+    spokenTextEn: textEn,
+    detectedIntent: 'disease_outbreak_alert',
+    language,
+    outbreakTriggered: true,
+    notificationsCreated: notifiedFarmers,
+    card: {
+      type: 'disease_outbreak_alert',
+      data: {
+        totalNearbyOutbreaks: 1,
+        nearbyReports: [
+          {
+            reportId: savedReport?.reportId || `outbreak-${Date.now()}`,
+            diseaseName: mention.diseaseNameEn,
+            diseaseNameEn: mention.diseaseNameEn,
+            diseaseNameTe: mention.diseaseNameTe,
+            crop: mention.crop,
+            cropTe: mention.cropTe,
+            distanceKm: 0.0,
+            severity: mention.severity,
+            verificationStatus: 'pending',
+            recommendedPrecautionEn: precautions.en,
+            recommendedPrecautionTe: precautions.te,
+          },
+        ],
+      },
+    },
+    suggestedQuickActions: [
+      {
+        titleEn: 'Check Spray Weather',
+        titleTe: 'పిచికారీ వాతావరణం పరిశీలించండి',
+        queryEn: 'Is the weather safe to spray today?',
+        queryTe: 'ఈ రోజు పిచికారీ చేయడానికి వాతావరణం అనుకూలమేనా?',
+      },
+      {
+        titleEn: 'Calculate Safe Chemical Dose',
+        titleTe: 'ధృవీకరించిన మందు మోతాదు లెక్కించండి',
+        queryEn: `What is the verified pesticide dose for this disease?`,
+        queryTe: 'ఈ తెగులు నివారణకు ఎంత మోతాదులో మందు కలపాలి?',
+      },
+    ],
+  });
 }
 
 function detectCropDiseaseMention(userMessage: string, currentCrop?: string): DetectedDiseaseMention | null {
@@ -727,7 +877,7 @@ function detectCropDiseaseMention(userMessage: string, currentCrop?: string): De
     q.includes('huge') ||
     q.includes('badly');
 
-  const severity: 'mild' | 'moderate' | 'severe' = isSevere ? 'severe' : 'moderate';
+  const severity: OutbreakSeverity = isSevere ? 'severe' : 'moderate';
 
   // Disease 1: Rice Blast
   if (
@@ -746,6 +896,7 @@ function detectCropDiseaseMention(userMessage: string, currentCrop?: string): De
       crop: 'Paddy',
       cropTe: 'వరి',
       severity,
+      pathogenType: 'fungal',
     };
   }
 
@@ -768,6 +919,7 @@ function detectCropDiseaseMention(userMessage: string, currentCrop?: string): De
       crop: 'Paddy',
       cropTe: 'వరి',
       severity,
+      pathogenType: 'bacterial',
     };
   }
 
@@ -787,6 +939,7 @@ function detectCropDiseaseMention(userMessage: string, currentCrop?: string): De
       crop: 'Paddy',
       cropTe: 'వరి',
       severity,
+      pathogenType: 'fungal',
     };
   }
 
@@ -806,6 +959,7 @@ function detectCropDiseaseMention(userMessage: string, currentCrop?: string): De
       crop: 'Paddy',
       cropTe: 'వరి',
       severity,
+      pathogenType: 'fungal',
     };
   }
 
@@ -825,6 +979,7 @@ function detectCropDiseaseMention(userMessage: string, currentCrop?: string): De
       crop: 'Paddy',
       cropTe: 'వరి',
       severity,
+      pathogenType: 'fungal',
     };
   }
 
@@ -848,6 +1003,7 @@ function detectCropDiseaseMention(userMessage: string, currentCrop?: string): De
       crop: 'Chilli',
       cropTe: 'మిరప',
       severity,
+      pathogenType: 'viral',
     };
   }
 
@@ -873,6 +1029,7 @@ function detectCropDiseaseMention(userMessage: string, currentCrop?: string): De
       crop: 'Chilli',
       cropTe: 'మిరప',
       severity,
+      pathogenType: 'fungal',
     };
   }
 
@@ -895,6 +1052,7 @@ function detectCropDiseaseMention(userMessage: string, currentCrop?: string): De
       crop,
       cropTe,
       severity,
+      pathogenType: 'fungal',
     };
   }
 
@@ -916,6 +1074,7 @@ function detectCropDiseaseMention(userMessage: string, currentCrop?: string): De
       crop,
       cropTe,
       severity,
+      pathogenType: 'bacterial',
     };
   }
 
@@ -936,6 +1095,47 @@ function detectCropDiseaseMention(userMessage: string, currentCrop?: string): De
       crop: currentCrop || 'Chilli',
       cropTe: getTeluguCropName(currentCrop || 'Chilli'),
       severity,
+      pathogenType: 'pest',
+    };
+  }
+
+  // Disease 11: Stem Borer / పురుగు
+  if (
+    q.includes('stem borer') ||
+    q.includes('borer') ||
+    q.includes('కాండం తొలిచే') ||
+    q.includes('తొలిచే పురుగు') ||
+    q.includes('మోడు చచ్చిపోవడం')
+  ) {
+    const crop = currentCrop || 'Paddy';
+    return {
+      diseaseKey: 'Stem Borer',
+      diseaseNameEn: 'Stem Borer (Scirpophaga incertulas)',
+      diseaseNameTe: 'కాండం తొలిచే పురుగు',
+      crop,
+      cropTe: getTeluguCropName(crop),
+      severity,
+      pathogenType: 'pest',
+    };
+  }
+
+  // Disease 12: Root Rot / Wilt / ఎండు తెగులు
+  if (
+    q.includes('root rot') ||
+    q.includes('wilt') ||
+    q.includes('fusarium') ||
+    q.includes('వేరు కుళ్లు') ||
+    q.includes('ఎండు తెగులు')
+  ) {
+    const crop = currentCrop || 'Chilli';
+    return {
+      diseaseKey: 'Fusarium Wilt',
+      diseaseNameEn: 'Fusarium Wilt / Root Rot (Fusarium oxysporum)',
+      diseaseNameTe: 'వేరు కుళ్లు / ఎండు తెగులు',
+      crop,
+      cropTe: getTeluguCropName(crop),
+      severity,
+      pathogenType: 'fungal',
     };
   }
 

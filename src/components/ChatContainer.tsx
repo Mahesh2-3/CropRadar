@@ -38,6 +38,7 @@ export interface ChatMessage {
     data: any;
   };
   cropSelectionPrompt?: boolean;
+  outbreakTriggered?: boolean;
   timestamp: string;
 }
 
@@ -183,6 +184,25 @@ export default function ChatContainer({
                   {msg.card.type === 'crop_history' && (
                     <HistorySummaryCard data={msg.card.data} language={language} />
                   )}
+                </div>
+              )}
+
+              {/* Automatic 5 km Outbreak Broadcast Notice */}
+              {msg.outbreakTriggered && msg.card?.type !== 'disease_outbreak_alert' && (
+                <div className="mt-2 rounded-xl border border-red-300 bg-red-50/90 p-3 text-xs text-red-950 dark:border-red-900 dark:bg-red-950/40 dark:text-red-100">
+                  <div className="flex items-center gap-2 font-bold text-red-700 dark:text-red-400">
+                    <Radio className="w-4 h-4 animate-pulse" />
+                    <span>
+                      {language === 'te'
+                        ? '🚨 5 కి.మీ రాడార్ హెచ్చరిక జారీ చేయబడింది'
+                        : '🚨 5 km Radar Outbreak Alert Dispatched'}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11px] leading-relaxed">
+                    {language === 'te'
+                      ? 'మీ పొలం నుండి 5 కి.మీ పరిధిలోని సమీప రైతులకు తక్షణ రక్షణ మరియు నివారణ చర్యలతో కూడిన హెచ్చరిక పంపబడింది.'
+                      : 'Nearby farmers within 5 km have been notified with immediate preventive measures.'}
+                  </p>
                 </div>
               )}
 

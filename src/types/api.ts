@@ -128,6 +128,8 @@ export interface UnifiedAssistantResponse {
   detectedIntent: ContextualCardType | 'general_agronomy';
   language: LanguageCode;
   requiresCropSelection?: boolean;
+  outbreakTriggered?: boolean;
+  notificationsCreated?: number;
   card?: {
     type: ContextualCardType;
     data: any;

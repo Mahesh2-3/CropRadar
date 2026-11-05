@@ -4,9 +4,18 @@ import { calculateHaversineDistanceKm, fuzzCoordinatesToGrid } from '@/lib/geo/h
 import { encodeGeohash } from '@/lib/geo/geohash';
 import { DISEASE_TRANSLATIONS } from '@/config/agronomic-rules';
 import { DiseaseReport, OutbreakSeverity, PathogenCategory } from '@/types/models';
+import { COMMUNITY_NOTIFICATIONS } from '@/modules/geospatial/network';
 
 const MAX_ALERT_RADIUS_KM = 5;
 const REPORT_RETENTION_DAYS = 30;
+
+export interface LocationCoordinateInput {
+  latitude: number;
+  longitude: number;
+  district?: string;
+  village?: string;
+  mandal?: string;
+}
 
 export async function createFarmerReportedDiseaseReport(input: {
   reporterUid: string;
@@ -14,14 +23,16 @@ export async function createFarmerReportedDiseaseReport(input: {
   diseaseName: string;
   pathogenType: PathogenCategory;
   severity: OutbreakSeverity;
+  farmLocation?: LocationCoordinateInput;
 }) {
-  const report = await createDiseaseReport(input, 'pending');
-  const notifiedFarmers = await dispatchOutbreakNotifications(
+  const { report, exactLocation } = await createDiseaseReport(input, 'pending');
+  const notificationResult = await dispatchOutbreakNotifications(
     report,
     input.reporterUid,
-    'farmer-reported-outbreak'
+    'farmer-reported-outbreak',
+    exactLocation
   );
-  return { report, notifiedFarmers };
+  return { report, ...notificationResult };
 }
 
 export async function createAutomatedDiseaseReport(input: {
@@ -31,14 +42,16 @@ export async function createAutomatedDiseaseReport(input: {
   pathogenType: PathogenCategory;
   severity: OutbreakSeverity;
   sourceDiagnosisId: string;
+  farmLocation?: LocationCoordinateInput;
 }) {
-  const report = await createDiseaseReport(input, 'automated');
-  const notifiedFarmers = await dispatchOutbreakNotifications(
+  const { report, exactLocation } = await createDiseaseReport(input, 'automated');
+  const notificationResult = await dispatchOutbreakNotifications(
     report,
     input.reporterUid,
-    'ai-diagnosis-outbreak'
+    'ai-diagnosis-outbreak',
+    exactLocation
   );
-  return { report, notifiedFarmers };
+  return { report, ...notificationResult };
 }
 
 async function createDiseaseReport(
@@ -49,25 +62,53 @@ async function createDiseaseReport(
     pathogenType: PathogenCategory;
     severity: OutbreakSeverity;
     sourceDiagnosisId?: string;
+    farmLocation?: LocationCoordinateInput;
   },
   verificationStatus: DiseaseReport['verificationStatus']
-) {
+): Promise<{ report: DiseaseReport; exactLocation: LocationCoordinateInput }> {
   const db = getFirebaseAdminFirestore();
-  const reporterProfile = await db.collection('users').doc(input.reporterUid).get();
-  const farmLocation = reporterProfile.data()?.farmLocation;
-  if (
-    !reporterProfile.exists ||
-    reporterProfile.data()?.locationSetupComplete !== true ||
-    !isCoordinate(farmLocation?.latitude) ||
-    !isCoordinate(farmLocation?.longitude)
-  ) {
+  const reporterProfileDoc = await db.collection('users').doc(input.reporterUid).get();
+  const profileData = reporterProfileDoc.data() || {};
+
+  // Extract coordinates from profile first, then fallback to input.farmLocation
+  const extracted = extractCoordinates(profileData) || extractCoordinates(input.farmLocation);
+  if (!extracted) {
     throw new Error('FARM_LOCATION_REQUIRED');
   }
 
-  const fuzzed = fuzzCoordinatesToGrid(farmLocation.latitude, farmLocation.longitude);
+  // Ensure reporter profile has farmLocation and locationSetupComplete: true in Firestore
+  if (!extractCoordinates(profileData)) {
+    try {
+      await db.collection('users').doc(input.reporterUid).set(
+        {
+          farmLocation: {
+            latitude: extracted.latitude,
+            longitude: extracted.longitude,
+            district: extracted.district || 'Andhra Pradesh',
+            village: extracted.village || '',
+            displayNameEn: `${extracted.village || 'Farm'}, ${extracted.district || 'Andhra Pradesh'}`,
+            displayNameTe: `${extracted.village || 'పొలం'}, ${extracted.district || 'ఆంధ్రప్రదేశ్'}`,
+          },
+          locationSetupComplete: true,
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
+    } catch (saveErr) {
+      console.warn('Auto-saving reporter farmLocation failed:', saveErr);
+    }
+  }
+
+  const fuzzed = fuzzCoordinatesToGrid(extracted.latitude, extracted.longitude);
   const reportRef = db.collection('diseaseReports').doc();
   const translation = DISEASE_TRANSLATIONS[input.diseaseName];
   const cropTe = getTeluguCropName(input.crop);
+
+  const safeDistrict = extracted.district || 'Andhra Pradesh';
+  const safeAreaName = extracted.village
+    ? `${extracted.village} (approximate)`
+    : `${safeDistrict} (approximate)`;
+
   const report: DiseaseReport = {
     reportId: reportRef.id,
     anonymousReporterId: `farmer-${reportRef.id.slice(-8)}`,
@@ -75,25 +116,25 @@ async function createDiseaseReport(
     cropTe,
     diseaseName: input.diseaseName,
     diseaseNameTe: translation?.te || input.diseaseName,
-    pathogenType: input.pathogenType,
-    severity: input.severity,
+    pathogenType: input.pathogenType || 'fungal',
+    severity: input.severity || 'moderate',
     verificationStatus,
     ...(input.sourceDiagnosisId ? { sourceDiagnosisId: input.sourceDiagnosisId } : {}),
     approximateLocation: {
       latitude: fuzzed.latitude,
       longitude: fuzzed.longitude,
       geohash: encodeGeohash(fuzzed.latitude, fuzzed.longitude, 6),
-      areaName: `${farmLocation.village || farmLocation.district || 'Nearby area'} (approximate)`,
-      district: farmLocation.district,
-      mandal: farmLocation.mandal,
+      areaName: safeAreaName,
+      district: safeDistrict,
+      ...(extracted.mandal ? { mandal: extracted.mandal } : {}),
     },
     reportedAt: new Date().toISOString(),
-    verifiedByAgronomist: false,
+    verifiedByAgronomist: verificationStatus === 'verified',
   };
 
   await reportRef.set(report);
   await reportRef.collection('private').doc('reporter').set({ uid: input.reporterUid });
-  return report;
+  return { report, exactLocation: extracted };
 }
 
 export async function getStoredDiseaseReports(status?: 'pending' | 'automated' | 'verified' | 'rejected') {
@@ -137,7 +178,7 @@ export async function verifyStoredDiseaseReport(input: {
   const reporter = await reportRef.collection('private').doc('reporter').get();
   const reporterUidValue = reporter.data()?.uid;
   const reporterUid = typeof reporterUidValue === 'string' ? reporterUidValue : undefined;
-  const notifiedFarmers = await dispatchOutbreakNotifications(report, reporterUid, 'verified-outbreak');
+  const { notifiedFarmers } = await dispatchOutbreakNotifications(report, reporterUid, 'verified-outbreak');
   return {
     success: true,
     reportId: input.reportId,
@@ -148,81 +189,147 @@ export async function verifyStoredDiseaseReport(input: {
   };
 }
 
-async function dispatchOutbreakNotifications(
+/**
+ * Dispatches outbreak notifications to all farmers whose saved farm coordinates
+ * in Firestore are within 5 km of the alert origin.
+ * Excludes the reporter. Accurately handles distances <= 5.0 km (including ~0.0 km).
+ */
+export async function dispatchOutbreakNotifications(
   report: DiseaseReport,
   reporterUid: string | undefined,
-  notificationType: 'ai-diagnosis-outbreak' | 'farmer-reported-outbreak' | 'verified-outbreak'
+  notificationType: 'ai-diagnosis-outbreak' | 'farmer-reported-outbreak' | 'verified-outbreak',
+  reporterExactLocation?: LocationCoordinateInput
 ) {
   const db = getFirebaseAdminFirestore();
   const reporterProfile = reporterUid
     ? await db.collection('users').doc(reporterUid).get()
     : null;
-  const reporterFarmLocation = reporterProfile?.data()?.farmLocation;
-  // Use exact coordinates only for private matching; notifications keep the fuzzed location.
-  const alertOrigin = isCoordinate(reporterFarmLocation?.latitude) && isCoordinate(reporterFarmLocation?.longitude)
-    ? { latitude: reporterFarmLocation.latitude, longitude: reporterFarmLocation.longitude }
-    : report.approximateLocation;
+  const reporterProfileData = reporterProfile?.data();
+  const reporterCoords = extractCoordinates(reporterProfileData);
+
+  // Exact coordinates take precedence for accurate Haversine matching
+  const alertOrigin = reporterExactLocation
+    ? { latitude: reporterExactLocation.latitude, longitude: reporterExactLocation.longitude }
+    : reporterCoords
+    ? { latitude: reporterCoords.latitude, longitude: reporterCoords.longitude }
+    : { latitude: report.approximateLocation.latitude, longitude: report.approximateLocation.longitude };
+
   const usersSnapshot = await db.collection('users').get();
   const advice = getPrecaution(report);
   const batches: Array<ReturnType<typeof db.batch>> = [];
   let batch = db.batch();
   let batchWrites = 0;
   let notifiedFarmers = 0;
+  let usersWithFarmLocations = 0;
   const now = new Date().toISOString();
 
   for (const userDoc of usersSnapshot.docs) {
-    if (userDoc.id === reporterUid) continue;
+    // Strictly exclude the reporting farmer
+    if (reporterUid && userDoc.id === reporterUid) continue;
+
     const profile = userDoc.data();
-    const location = profile.farmLocation;
-    if (!isCoordinate(location?.latitude) || !isCoordinate(location?.longitude)) continue;
+    const userCoords = extractCoordinates(profile);
+    if (!userCoords) continue;
+    usersWithFarmLocations += 1;
 
     const distanceKm = calculateHaversineDistanceKm(
-      location.latitude,
-      location.longitude,
+      userCoords.latitude,
+      userCoords.longitude,
       alertOrigin.latitude,
       alertOrigin.longitude
     );
+
+    // Farmers qualify if distance is 5 km or less (including 0.0 km when lat/long are nearly identical)
     if (distanceKm > MAX_ALERT_RADIUS_KM) continue;
 
-    const notificationRef = userDoc.ref.collection('notifications').doc(report.reportId);
-    batch.set(notificationRef, {
+    const sanitizedDistance = Math.round(distanceKm * 10) / 10;
+    const notificationPayload = {
+      id: report.reportId,
       userId: userDoc.id,
       type: notificationType,
       reportId: report.reportId,
       titleEn: getNotificationTitle(report, notificationType, 'en'),
       titleTe: getNotificationTitle(report, notificationType, 'te'),
-      messageEn: getNotificationMessage(report, notificationType, distanceKm, 'en'),
-      messageTe: getNotificationMessage(report, notificationType, distanceKm, 'te'),
-      crop: report.crop,
-      cropTe: report.cropTe,
-      diseaseName: report.diseaseName,
-      diseaseNameTe: report.diseaseNameTe,
-      severity: report.severity,
-      distanceKm: Math.round(distanceKm * 10) / 10,
-      approximateLocation: report.approximateLocation,
-      recommendedActionEn: advice.en,
-      recommendedActionTe: advice.te,
+      messageEn: getNotificationMessage(report, notificationType, sanitizedDistance, 'en'),
+      messageTe: getNotificationMessage(report, notificationType, sanitizedDistance, 'te'),
+      crop: report.crop || 'Crop',
+      cropTe: report.cropTe || report.crop || 'పంట',
+      diseaseName: report.diseaseName || 'Disease',
+      diseaseNameTe: report.diseaseNameTe || report.diseaseName || 'తెగులు',
+      severity: report.severity || 'moderate',
+      distanceKm: sanitizedDistance,
+      approximateLocation: {
+        latitude: report.approximateLocation.latitude,
+        longitude: report.approximateLocation.longitude,
+        geohash: report.approximateLocation.geohash || '',
+        areaName: report.approximateLocation.areaName || 'Nearby area',
+        district: report.approximateLocation.district || 'Andhra Pradesh',
+      },
+      recommendedActionEn: advice.en || '',
+      recommendedActionTe: advice.te || '',
       createdAt: now,
       read: false,
-    });
-    notifiedFarmers += 1;
+    };
+
+    // 1. Write to user subcollection: users/{uid}/notifications/{reportId}
+    const userNotificationRef = userDoc.ref.collection('notifications').doc(report.reportId);
+    batch.set(userNotificationRef, notificationPayload, { merge: true });
     batchWrites += 1;
 
-    if (batchWrites === 450) {
+    // 2. Also write to root notifications collection: notifications/{uid}_{reportId} for query flexibility
+    const rootNotificationRef = db.collection('notifications').doc(`${userDoc.id}_${report.reportId}`);
+    batch.set(rootNotificationRef, notificationPayload, { merge: true });
+    batchWrites += 1;
+
+    notifiedFarmers += 1;
+
+    // 3. Populate in-memory community notifications store for instant real-time UI availability
+    try {
+      COMMUNITY_NOTIFICATIONS.unshift({
+        id: `notif-${userDoc.id}-${report.reportId}`,
+        type: notificationType,
+        reportId: report.reportId,
+        titleEn: notificationPayload.titleEn,
+        titleTe: notificationPayload.titleTe,
+        messageEn: notificationPayload.messageEn,
+        messageTe: notificationPayload.messageTe,
+        crop: notificationPayload.crop,
+        cropTe: notificationPayload.cropTe,
+        diseaseName: notificationPayload.diseaseName,
+        diseaseNameTe: notificationPayload.diseaseNameTe,
+        severity: (notificationPayload.severity as OutbreakSeverity) || 'moderate',
+        distanceKm: notificationPayload.distanceKm,
+        recommendedActionEn: notificationPayload.recommendedActionEn,
+        recommendedActionTe: notificationPayload.recommendedActionTe,
+        createdAt: now,
+        read: false,
+      });
+    } catch {
+      // non-critical
+    }
+
+    if (batchWrites >= 450) {
       batches.push(batch);
       batch = db.batch();
       batchWrites = 0;
     }
   }
 
-  if (batchWrites) batches.push(batch);
-  for (const pendingBatch of batches) await pendingBatch.commit();
+  if (batchWrites > 0) batches.push(batch);
+  for (const pendingBatch of batches) {
+    await pendingBatch.commit();
+  }
 
-  await db.collection('diseaseReports').doc(report.reportId).update({
-    notificationsSentAt: now,
-    notifiedFarmers,
-  });
-  return notifiedFarmers;
+  try {
+    await db.collection('diseaseReports').doc(report.reportId).update({
+      notificationsSentAt: now,
+      notifiedFarmers,
+    });
+  } catch (updateErr) {
+    console.warn('Updating diseaseReport with notificationsSentAt failed:', updateErr);
+  }
+
+  return { notifiedFarmers, usersWithFarmLocations };
 }
 
 function getNotificationTitle(
@@ -251,43 +358,44 @@ function getNotificationMessage(
   distanceKm: number,
   language: 'en' | 'te'
 ) {
+  const distStr = Number.isFinite(distanceKm) ? distanceKm.toFixed(1) : '0.0';
   if (type === 'verified-outbreak') {
     return language === 'en'
-      ? `${report.diseaseName} was verified about ${distanceKm.toFixed(1)} km from your farm.`
-      : `మీ పొలానికి సుమారు ${distanceKm.toFixed(1)} కి.మీ దూరంలో ${report.diseaseNameTe} ధృవీకరించబడింది.`;
+      ? `${report.diseaseName} was verified about ${distStr} km from your farm.`
+      : `మీ పొలానికి సుమారు ${distStr} కి.మీ దూరంలో ${report.diseaseNameTe} ధృవీకరించబడింది.`;
   }
   if (type === 'ai-diagnosis-outbreak') {
     return language === 'en'
-      ? `An AI-assisted image diagnosis suggested ${report.diseaseName} about ${distanceKm.toFixed(1)} km from your farm. This report has not been field-verified.`
-      : `మీ పొలానికి సుమారు ${distanceKm.toFixed(1)} కి.మీ దూరంలో ${report.diseaseNameTe} ఉండవచ్చని AI చిత్రం విశ్లేషణ సూచించింది. ఈ నివేదిక క్షేత్రస్థాయిలో ధృవీకరించబడలేదు.`;
+      ? `An AI-assisted image diagnosis suggested ${report.diseaseName} about ${distStr} km from your farm. This report has not been field-verified.`
+      : `మీ పొలానికి సుమారు ${distStr} కి.మీ దూరంలో ${report.diseaseNameTe} ఉండవచ్చని AI చిత్రం విశ్లేషణ సూచించింది. ఈ నివేదిక క్షేత్రస్థాయిలో ధృవీకరించబడలేదు.`;
   }
   return language === 'en'
-    ? `A nearby farmer reported ${report.diseaseName} about ${distanceKm.toFixed(1)} km from your farm. This report has not been field-verified.`
-    : `మీ పొలానికి సుమారు ${distanceKm.toFixed(1)} కి.మీ దూరంలో ${report.diseaseNameTe} ఉన్నట్లు సమీప రైతు నివేదించారు. ఈ నివేదిక క్షేత్రస్థాయిలో ధృవీకరించబడలేదు.`;
+    ? `A nearby farmer reported ${report.diseaseName} about ${distStr} km from your farm. This report has not been field-verified.`
+    : `మీ పొలానికి సుమారు ${distStr} కి.మీ దూరంలో ${report.diseaseNameTe} ఉన్నట్లు సమీప రైతు నివేదించారు. ఈ నివేదిక క్షేత్రస్థాయిలో ధృవీకరించబడలేదు.`;
 }
 
-function getPrecaution(report: DiseaseReport) {
+export function getPrecaution(report: DiseaseReport) {
   if (report.pathogenType === 'fungal') {
     return {
-      en: 'Scout nearby plants for matching symptoms, remove heavily infected debris safely, and avoid moving plant material between fields. Ask a local agriculture officer before spraying.',
-      te: 'సమీప మొక్కల్లో ఇలాంటి లక్షణాలు ఉన్నాయో పరిశీలించండి. తీవ్రంగా సోకిన అవశేషాలను సురక్షితంగా తొలగించి పొలాల మధ్యకు మొక్కల భాగాలను తరలించవద్దు. పిచికారీకి ముందు స్థానిక వ్యవసాయ అధికారిని సంప్రదించండి.',
+      en: 'Scout nearby plants for matching symptoms, remove heavily infected debris safely, avoid moving plant material between fields, and reduce excess moisture. Check verified spray guidance before applying treatment.',
+      te: 'సమీప మొక్కల్లో ఇలాంటి లక్షణాలు ఉన్నాయో పరిశీలించండి. తీవ్రంగా సోకిన అవశేషాలను సురక్షితంగా తొలగించి పొలాల మధ్యకు మొక్కల భాగాలను తరలించవద్దు. అధిక తేమను నివారించి, ధృవీకరించిన పిచికారీ మార్గదర్శకాలను పాటించండి.',
     };
   }
   if (report.pathogenType === 'bacterial') {
     return {
-      en: 'Inspect nearby plants, avoid working in wet foliage, and clean tools between plots. Confirm the cause with a local agriculture officer before applying any treatment.',
-      te: 'సమీప మొక్కలను పరిశీలించండి. తడిగా ఉన్న ఆకుల మధ్య పని చేయకుండా, పొలాల మధ్య పనిముట్లను శుభ్రం చేయండి. ఏ చికిత్సకైనా ముందు స్థానిక వ్యవసాయ అధికారితో కారణాన్ని నిర్ధారించండి.',
+      en: 'Inspect nearby plants, avoid working in wet foliage, stop excessive nitrogen fertilization, and clean tools between plots. Confirm symptoms with local agriculture officers.',
+      te: 'సమీప మొక్కలను పరిశీలించండి. తడిగా ఉన్న ఆకుల మధ్య పని చేయకుండా, అధిక నత్రజని వాడకాన్ని తగ్గించండి. పొలాల మధ్య పనిముట్లను శుభ్రం చేసి, స్థానిక వ్యవసాయ అధికారుల సూచనలు పాటించండి.',
     };
   }
   if (report.pathogenType === 'viral' || report.pathogenType === 'pest') {
     return {
-      en: 'Scout the crop and leaf undersides for symptoms or insect vectors. Avoid moving affected plants and ask a local agriculture officer about safe, crop-registered control options.',
-      te: 'పంటను, ఆకుల అడుగుభాగాన్ని లక్షణాలు లేదా పురుగుల కోసం పరిశీలించండి. సోకిన మొక్కలను తరలించకుండా, పంటకు నమోదు చేసిన సురక్షిత నియంత్రణ పద్ధతుల కోసం స్థానిక వ్యవసాయ అధికారిని సంప్రదించండి.',
+      en: 'Scout the crop and leaf undersides for symptoms or insect vectors (thrips/whiteflies). Avoid moving affected plants and use sticky traps or safe bio-control options.',
+      te: 'పంటను, ఆకుల అడుగుభాగాన్ని తెగులు లేదా రసం పీల్చే పురుగుల (తామర పురుగులు, తెల్ల దోమ) కోసం పరిశీలించండి. సోకిన మొక్కలను తొలగించి, జిగురు అట్టలు లేదా జీవ నియంత్రణ పద్ధతులు ఉపయోగించండి.',
     };
   }
   return {
-    en: 'Inspect nearby plants for matching symptoms and confirm the cause with a local agriculture officer before changing irrigation or applying any treatment.',
-    te: 'సమీప మొక్కల్లో ఇలాంటి లక్షణాలు ఉన్నాయో పరిశీలించండి. నీటి పారుదల మార్చే ముందు లేదా చికిత్స చేసే ముందు స్థానిక వ్యవసాయ అధికారితో కారణాన్ని నిర్ధారించండి.',
+    en: 'Inspect nearby plants for matching symptoms and confirm the cause with local agriculture guidance before changing irrigation or applying chemical treatments.',
+    te: 'సమీప మొక్కల్లో ఇలాంటి లక్షణాలు ఉన్నాయో పరిశీలించండి. నీటి పారుదల మార్చే ముందు లేదా రసాయన చికిత్స చేసే ముందు వ్యవసాయ మార్గదర్శకాలను నిర్ధారించుకోండి.',
   };
 }
 
@@ -302,6 +410,99 @@ function getTeluguCropName(crop: string): string {
   return labels[crop] || crop;
 }
 
-function isCoordinate(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value);
+export function isCoordinate(value: unknown): value is number {
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value.trim());
+    return Number.isFinite(parsed);
+  }
+  return false;
+}
+
+/**
+ * Robustly extracts geographic coordinates from any document or object structure.
+ * Examines all standard and alternative keys:
+ * - farmLocation, farm_location, location, coordinates, coords, geo, farm, profile.farmLocation
+ * - latitude, _latitude, lat, _lat, latitudeDeg
+ * - longitude, _longitude, lng, _lng, lon, _lon, long, _long, longitudeDeg
+ * - parses numeric strings as well as numbers.
+ */
+export function extractCoordinates(data: unknown): LocationCoordinateInput | null {
+  if (!data || typeof data !== 'object') return null;
+  const obj = data as Record<string, any>;
+
+  const candidateContainers = [
+    obj.farmLocation,
+    obj.farm_location,
+    obj.location,
+    obj.coordinates,
+    obj.coords,
+    obj.geo,
+    obj.farm,
+    obj.profile?.farmLocation,
+    obj.farmerProfile?.farmLocation,
+    obj,
+  ];
+
+  for (const cand of candidateContainers) {
+    if (!cand || typeof cand !== 'object') continue;
+
+    const rawLat = cand.latitude ?? cand._latitude ?? cand.lat ?? cand._lat ?? cand.latitudeDeg;
+    const rawLng =
+      cand.longitude ??
+      cand._longitude ??
+      cand.lng ??
+      cand._lng ??
+      cand.lon ??
+      cand._lon ??
+      cand.long ??
+      cand._long ??
+      cand.longitudeDeg;
+
+    const lat =
+      typeof rawLat === 'number'
+        ? rawLat
+        : typeof rawLat === 'string' && rawLat.trim() !== ''
+        ? parseFloat(rawLat.trim())
+        : NaN;
+
+    const lng =
+      typeof rawLng === 'number'
+        ? rawLng
+        : typeof rawLng === 'string' && rawLng.trim() !== ''
+        ? parseFloat(rawLng.trim())
+        : NaN;
+
+    if (
+      Number.isFinite(lat) &&
+      Number.isFinite(lng) &&
+      lat >= -90 &&
+      lat <= 90 &&
+      lng >= -180 &&
+      lng <= 180
+    ) {
+      const district =
+        (typeof cand.district === 'string' && cand.district.trim()) ||
+        (typeof obj.district === 'string' && obj.district.trim()) ||
+        undefined;
+      const village =
+        (typeof cand.village === 'string' && cand.village.trim()) ||
+        (typeof obj.village === 'string' && obj.village.trim()) ||
+        undefined;
+      const mandal =
+        (typeof cand.mandal === 'string' && cand.mandal.trim()) ||
+        (typeof obj.mandal === 'string' && obj.mandal.trim()) ||
+        undefined;
+
+      return {
+        latitude: lat,
+        longitude: lng,
+        district,
+        village,
+        mandal,
+      };
+    }
+  }
+
+  return null;
 }
